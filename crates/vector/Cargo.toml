@@ -7,10 +7,8 @@ description = "HNSW vector index, distance metrics, VECTOR type, quantization"
 
 [dependencies]
 dllb-core = { workspace = true }
-dllb-storage = { workspace = true }
-joerl = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-half = { workspace = true }
-rayon = { workspace = true }
+rand = "0.9"
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

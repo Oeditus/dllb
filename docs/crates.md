@@ -93,10 +93,19 @@ See [search.md](search.md) for detailed documentation.
 ## dllb-vector
 
 **Path:** `crates/vector/`
-**Status:** Stub (Phase 5)
+**Status:** Implemented (Phase 5 complete)
 
-HNSW approximate nearest neighbor index, VECTOR data type, distance metrics
-(cosine, L2, dot product), bf16 storage, optional quantization.
+Vector similarity search with distance metrics, brute-force exact KNN,
+and in-memory HNSW approximate nearest neighbor index.
+
+| Module | Contents |
+|--------|----------|
+| `distance` | `DistanceMetric` (Cosine/Euclidean/DotProduct), distance functions |
+| `brute_force` | `BruteForceIndex` -- exact KNN via linear scan |
+| `hnsw` | `HnswIndex`, `HnswConfig` -- in-memory HNSW graph with configurable M/ef/layers |
+| (lib) | `VectorHit` (id + distance), `VectorIndex` trait |
+
+See [vectors.md](vectors.md) for detailed documentation.
 
 ## dllb-code-intel
 

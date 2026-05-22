@@ -269,7 +269,7 @@ SELECT id, name,
 - [x] Document CRUD with MessagePack serialization, schema validation, secondary indexes
 - [x] Graph edge storage and traversal (bidirectional, multi-hop walk, filtered)
 - [x] Tantivy full-text integration (BM25 scoring, language stemming, multi-index)
-- [ ] HNSW vector index
+- [x] HNSW vector index (distance metrics, brute-force baseline, in-memory HNSW with recall tests)
 - [ ] AST/MetaAST code intelligence layer
 - [ ] Query parser and executor
 - [ ] TCP server and CLI REPL
