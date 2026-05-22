@@ -43,10 +43,21 @@ and garbage collection of old versions.
 ## dllb-document
 
 **Path:** `crates/document/`
-**Status:** Stub (Phase 2)
+**Status:** Implemented (Phase 2 complete)
 
-Document model: CRUD operations over the KV store, MessagePack serialization,
-secondary B-tree indexes, schema validation.
+Document model: CRUD operations, MessagePack/JSON serialization, schema
+validation (schemaless + schemafull), secondary B-tree indexes with
+sort-preserving encoding and unique constraints.
+
+| Module | Contents |
+|--------|----------|
+| `document` | `Document` struct with builder pattern and field accessors |
+| `serde` | MessagePack (internal) and JSON (client) serialization |
+| `validate` | Schema validation: required fields, type checking, vector dimensions |
+| `index` | `IndexDefinition`, sort-preserving `encode_index_value`, `find_by_index` |
+| `collection` | `Collection` CRUD: create/get/update/merge/delete/scan_all/count/find_by_index |
+
+See [documents.md](documents.md) for detailed documentation.
 
 ## dllb-graph
 

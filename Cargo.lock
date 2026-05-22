@@ -334,7 +334,9 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

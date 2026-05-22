@@ -265,8 +265,8 @@ SELECT id, name,
 - [x] Project structure and workspace setup
 - [x] Core types (RecordId, Value, Schema, Error)
 - [x] KvStore trait and key encoding
-- [ ] redb backend implementation
-- [ ] Document CRUD
+- [x] redb backend implementation
+- [x] Document CRUD with MessagePack serialization, schema validation, secondary indexes
 - [ ] Graph edge storage and traversal
 - [ ] Tantivy full-text integration
 - [ ] HNSW vector index
