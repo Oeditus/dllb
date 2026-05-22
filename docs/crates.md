@@ -78,10 +78,17 @@ See [graphs.md](graphs.md) for detailed documentation.
 ## dllb-search
 
 **Path:** `crates/search/`
-**Status:** Stub (Phase 4)
+**Status:** Implemented (Phase 4 complete)
 
-Tantivy integration: full-text index management, BM25 scoring, configurable
-analyzers, transactional sync with the KV store via `FtsActor`.
+Tantivy-backed full-text search with BM25 scoring and configurable analyzers.
+
+| Module | Contents |
+|--------|----------|
+| `analyzer` | `AnalyzerConfig` (Default/Language/Simple), `Language` enum, `build_analyzer()` |
+| `fts_index` | `FtsIndex` wrapping a single Tantivy index; `SearchHit` with id + BM25 score |
+| `manager` | `FtsManager` managing multiple `table.field` indexes with lifecycle methods |
+
+See [search.md](search.md) for detailed documentation.
 
 ## dllb-vector
 

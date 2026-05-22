@@ -368,11 +368,9 @@ dependencies = [
 name = "dllb-search"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "dllb-core",
- "joerl",
  "tantivy",
- "tokio",
+ "tempfile",
  "tracing",
 ]
 
