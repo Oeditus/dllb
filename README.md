@@ -267,7 +267,7 @@ SELECT id, name,
 - [x] KvStore trait and key encoding
 - [x] redb backend implementation
 - [x] Document CRUD with MessagePack serialization, schema validation, secondary indexes
-- [ ] Graph edge storage and traversal
+- [x] Graph edge storage and traversal (bidirectional, multi-hop walk, filtered)
 - [ ] Tantivy full-text integration
 - [ ] HNSW vector index
 - [ ] AST/MetaAST code intelligence layer

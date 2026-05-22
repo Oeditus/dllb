@@ -112,7 +112,64 @@ pub fn document_key(ns: &str, db: &str, table: &str, id: &str) -> Vec<u8> {
         .build()
 }
 
-/// Build a graph edge key (outgoing): `ns\0db\0table\0~src\0edge_type\0dst`.
+/// Direction prefix bytes for graph edge keys.
+///
+/// Within a vertex's edge region (`~vertex_id\0`), the direction byte
+/// separates incoming from outgoing edges:
+/// - `<` (0x3C) for incoming edges (reverse pointers)
+/// - `>` (0x3E) for outgoing edges (forward pointers)
+pub mod dir {
+    pub const INCOMING: u8 = b'<'; // 0x3C
+    pub const OUTGOING: u8 = b'>'; // 0x3E
+}
+
+/// Build a graph edge key (outgoing): `ns\0db\0table\0~src\0>edge_type\0dst`.
+pub fn graph_outgoing_key(
+    ns: &str,
+    db: &str,
+    table: &str,
+    src: &str,
+    edge_type: &str,
+    dst: &str,
+) -> Vec<u8> {
+    let mut et = Vec::with_capacity(1 + edge_type.len());
+    et.push(dir::OUTGOING);
+    et.extend_from_slice(edge_type.as_bytes());
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::GRAPH_EDGE)
+        .segment(src.as_bytes())
+        .segment(&et)
+        .raw(dst.as_bytes())
+        .build()
+}
+
+/// Build a graph reverse edge key (incoming): `ns\0db\0table\0~dst\0<edge_type\0src`.
+pub fn graph_incoming_key(
+    ns: &str,
+    db: &str,
+    table: &str,
+    dst: &str,
+    edge_type: &str,
+    src: &str,
+) -> Vec<u8> {
+    let mut et = Vec::with_capacity(1 + edge_type.len());
+    et.push(dir::INCOMING);
+    et.extend_from_slice(edge_type.as_bytes());
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::GRAPH_EDGE)
+        .segment(dst.as_bytes())
+        .segment(&et)
+        .raw(src.as_bytes())
+        .build()
+}
+
+/// Legacy alias -- kept for backward compatibility with Phase 1 tests.
 pub fn graph_edge_key(
     ns: &str,
     db: &str,
@@ -121,14 +178,72 @@ pub fn graph_edge_key(
     edge_type: &str,
     dst: &str,
 ) -> Vec<u8> {
+    graph_outgoing_key(ns, db, table, src, edge_type, dst)
+}
+
+/// Prefix for all outgoing edges from a vertex: `ns\0db\0table\0~vertex_id\0>`.
+pub fn vertex_outgoing_prefix(ns: &str, db: &str, table: &str, vertex_id: &str) -> Vec<u8> {
     KeyBuilder::new()
         .namespace(ns)
         .database(db)
         .table(table)
         .tag(tag::GRAPH_EDGE)
-        .segment(src.as_bytes())
-        .segment(edge_type.as_bytes())
-        .raw(dst.as_bytes())
+        .segment(vertex_id.as_bytes())
+        .raw(&[dir::OUTGOING])
+        .build()
+}
+
+/// Prefix for all incoming edges to a vertex: `ns\0db\0table\0~vertex_id\0<`.
+pub fn vertex_incoming_prefix(ns: &str, db: &str, table: &str, vertex_id: &str) -> Vec<u8> {
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::GRAPH_EDGE)
+        .segment(vertex_id.as_bytes())
+        .raw(&[dir::INCOMING])
+        .build()
+}
+
+/// Prefix for outgoing edges of a specific type from a vertex.
+pub fn vertex_outgoing_typed_prefix(
+    ns: &str,
+    db: &str,
+    table: &str,
+    vertex_id: &str,
+    edge_type: &str,
+) -> Vec<u8> {
+    let mut et = Vec::with_capacity(1 + edge_type.len());
+    et.push(dir::OUTGOING);
+    et.extend_from_slice(edge_type.as_bytes());
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::GRAPH_EDGE)
+        .segment(vertex_id.as_bytes())
+        .segment(&et)
+        .build()
+}
+
+/// Prefix for incoming edges of a specific type to a vertex.
+pub fn vertex_incoming_typed_prefix(
+    ns: &str,
+    db: &str,
+    table: &str,
+    vertex_id: &str,
+    edge_type: &str,
+) -> Vec<u8> {
+    let mut et = Vec::with_capacity(1 + edge_type.len());
+    et.push(dir::INCOMING);
+    et.extend_from_slice(edge_type.as_bytes());
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::GRAPH_EDGE)
+        .segment(vertex_id.as_bytes())
+        .segment(&et)
         .build()
 }
 

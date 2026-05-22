@@ -62,10 +62,18 @@ See [documents.md](documents.md) for detailed documentation.
 ## dllb-graph
 
 **Path:** `crates/graph/`
-**Status:** Stub (Phase 3)
+**Status:** Implemented (Phase 3 complete)
 
-Native graph model: edge storage as bidirectional KV pairs, BFS/DFS traversal,
-multi-hop path queries, pattern matching.
+Native graph model with bidirectional edge storage, direction-aware prefix
+scans, and multi-hop traversal.
+
+| Module | Contents |
+|--------|----------|
+| `edge` | `Edge` struct with builder pattern and arbitrary properties |
+| `store` | `EdgeStore` CRUD: relate/get/delete/update_properties (atomic bidirectional writes) |
+| `traverse` | `Traversal` engine: outgoing/incoming/typed/walk/filtered; `Direction`, `HopSpec` types |
+
+See [graphs.md](graphs.md) for detailed documentation.
 
 ## dllb-search
 

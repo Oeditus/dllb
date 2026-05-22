@@ -345,6 +345,9 @@ version = "0.1.0"
 dependencies = [
  "dllb-core",
  "dllb-storage",
+ "rmp-serde",
+ "serde",
+ "tempfile",
  "tracing",
 ]
 
