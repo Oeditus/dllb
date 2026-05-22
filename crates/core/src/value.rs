@@ -1,4 +1,21 @@
-//! The `Value` enum represents any value storable in dllb.
+//! Dynamically-typed values storable in dllb.
+//!
+//! [`Value`] is the universal currency of the database: every document field,
+//! edge property, and query result is a `Value`. The enum covers scalars
+//! (bool, int, float, string), collections (array, object), references
+//! (`RecordId`), binary blobs, and dense vector embeddings.
+//!
+//! # Conversion
+//!
+//! Common Rust types convert into `Value` via `From` impls:
+//!
+//! ```
+//! use dllb_core::Value;
+//!
+//! let v: Value = 42i64.into();
+//! let v: Value = "hello".to_string().into();
+//! let v: Value = vec![0.1f32, 0.2, 0.3].into(); // Vector embedding
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

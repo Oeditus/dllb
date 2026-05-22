@@ -1,4 +1,8 @@
-//! Error types for dllb.
+//! Unified error types for the dllb database.
+//!
+//! Every crate in the workspace returns `dllb_core::Result<T>`, which uses
+//! [`Error`] as the error type. External errors (redb, Tantivy, serialization)
+//! are mapped into the appropriate variant at crate boundaries.
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

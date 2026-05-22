@@ -9,7 +9,9 @@
 
 <p align="center">
   <a href="PLAN.md">Detailed Plan</a> &middot;
-  <a href="#architecture">Architecture</a> &middot;
+  <a href="docs/architecture.md">Architecture</a> &middot;
+  <a href="docs/storage.md">Storage Engine</a> &middot;
+  <a href="docs/crates.md">Crate Reference</a> &middot;
   <a href="#getting-started">Getting Started</a> &middot;
   <a href="#license">License</a>
 </p>

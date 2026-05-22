@@ -3,11 +3,36 @@
 use dllb_core::Result;
 
 /// A key-value store with transactional semantics.
+///
+/// All operations are synchronous -- redb operations are blocking and
+/// sub-millisecond. The actor layer (StorageWriter) handles async dispatch.
 pub trait KvStore: Send + Sync {
+    /// Get the value for `key`, or `None` if absent.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Insert or overwrite `key` with `value`.
     fn put(&self, key: &[u8], value: &[u8]) -> Result<()>;
+
+    /// Delete `key`. No-op if the key does not exist.
     fn delete(&self, key: &[u8]) -> Result<()>;
 
-    /// Scan all key-value pairs in the range `[start, end)`.
+    /// Scan all key-value pairs in the half-open range `[start, end)`.
     fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
+    /// Insert multiple key-value pairs in a single atomic transaction.
+    fn put_batch(&self, ops: &[(&[u8], &[u8])]) -> Result<()>;
+
+    /// Delete multiple keys in a single atomic transaction.
+    fn delete_batch(&self, keys: &[&[u8]]) -> Result<()>;
+
+    /// Check whether `key` exists without reading the value.
+    fn contains(&self, key: &[u8]) -> Result<bool> {
+        Ok(self.get(key)?.is_some())
+    }
+
+    /// Scan all keys sharing the given `prefix`.
+    fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let end = crate::key::prefix_end(prefix);
+        self.scan(prefix, &end)
+    }
 }

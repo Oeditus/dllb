@@ -1,4 +1,23 @@
-//! Composite record identifiers: `table:id`.
+//! Composite record identifiers in the form `table:id`.
+//!
+//! Every record in dllb is uniquely identified by a [`RecordId`] combining
+//! the table name and a per-record identifier. IDs can be user-supplied
+//! strings or auto-generated UUIDs.
+//!
+//! # Examples
+//!
+//! ```
+//! use dllb_core::RecordId;
+//!
+//! let explicit = RecordId::new("user", "alice");
+//! assert_eq!(explicit.to_string(), "user:alice");
+//!
+//! let generated = RecordId::generate("user");
+//! assert!(generated.to_string().starts_with("user:"));
+//!
+//! let parsed: RecordId = "product:widget".parse().unwrap();
+//! assert_eq!(parsed.table, "product");
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -1,4 +1,13 @@
-//! Schema definitions: table schemas, field types, index definitions.
+//! Schema definitions for dllb tables and fields.
+//!
+//! dllb supports two schema modes:
+//!
+//! - **Schemaless**: any fields can be stored; no validation on write.
+//! - **Schemafull**: all fields must be declared with types; writes are
+//!   validated against the schema.
+//!
+//! The [`FieldType::Vector`] variant carries a fixed dimensionality,
+//! enabling the database to validate embedding dimensions at write time.
 
 use serde::{Deserialize, Serialize};
 
