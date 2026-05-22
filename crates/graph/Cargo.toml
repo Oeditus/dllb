@@ -1,0 +1,11 @@
+[package]
+name = "dllb-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native graph model: edge storage, traversal engine"
+
+[dependencies]
+dllb-core = { workspace = true }
+dllb-storage = { workspace = true }
+tracing = { workspace = true }

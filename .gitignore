@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock for libraries (keep for binaries -- this workspace has both)
+# Cargo.lock is committed intentionally
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database files created at runtime
+*.redb
+*.wal
+*.db
+
+# Tantivy index directories
+.tantivy/
+
+# OS
+Thumbs.db
+.directory
+
+# Coverage / profiling
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# Benchmarks output
+criterion/

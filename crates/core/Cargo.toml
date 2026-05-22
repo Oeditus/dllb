@@ -1,0 +1,15 @@
+[package]
+name = "dllb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types for dllb: RecordId, Value, Error, Schema"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+half = { workspace = true }

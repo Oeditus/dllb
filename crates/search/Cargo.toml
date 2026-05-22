@@ -1,0 +1,14 @@
+[package]
+name = "dllb-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tantivy integration for full-text search with BM25 scoring"
+
+[dependencies]
+dllb-core = { workspace = true }
+tantivy = { workspace = true }
+joerl = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

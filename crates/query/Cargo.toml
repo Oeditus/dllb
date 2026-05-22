@@ -1,0 +1,15 @@
+[package]
+name = "dllb-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query language: lexer, parser, AST, planner, optimizer, executor"
+
+[dependencies]
+dllb-core = { workspace = true }
+dllb-storage = { workspace = true }
+dllb-document = { workspace = true }
+dllb-graph = { workspace = true }
+dllb-search = { workspace = true }
+dllb-vector = { workspace = true }
+tracing = { workspace = true }

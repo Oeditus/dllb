@@ -1,0 +1,16 @@
+[package]
+name = "dllb-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TCP/WebSocket server for dllb"
+
+[dependencies]
+dllb-core = { workspace = true }
+dllb-storage = { workspace = true }
+dllb-query = { workspace = true }
+joerl = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

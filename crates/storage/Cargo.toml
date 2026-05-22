@@ -1,0 +1,17 @@
+[package]
+name = "dllb-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KV store trait, redb backend, WAL, key encoding"
+
+[dependencies]
+dllb-core = { workspace = true }
+redb = { workspace = true }
+joerl = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+crc32fast = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

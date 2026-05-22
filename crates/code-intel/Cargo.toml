@@ -1,0 +1,11 @@
+[package]
+name = "dllb-code-intel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AST/MetaAST schemas, code-aware tokenizer, structural pattern matching"
+
+[dependencies]
+dllb-core = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
