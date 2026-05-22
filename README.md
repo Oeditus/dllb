@@ -272,7 +272,7 @@ SELECT id, name,
 - [x] HNSW vector index (distance metrics, brute-force baseline, in-memory HNSW with recall tests)
 - [ ] AST/MetaAST code intelligence layer
 - [x] Query parser and executor (tokenizer, recursive-descent parser, direct executor)
-- [ ] TCP server and CLI REPL
+- [x] TCP server and CLI REPL (tokio TCP, line protocol, JSON responses, rustyline REPL)
 
 ### Future
 

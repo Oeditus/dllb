@@ -137,14 +137,22 @@ See [query.md](query.md) for detailed documentation.
 
 **Path:** `crates/server/`
 **Type:** Binary
+**Status:** Implemented (Phase 7 complete)
 
-TCP/WebSocket server. Each client connection is an actor supervised by
-`client_sup`. Protocol: text-based (Redis RESP-like) for the prototype.
+Tokio-based TCP server with line-based text protocol. Each connection is
+a tokio task. Queries are parsed and executed via `QueryExecutor::run()`,
+responses are JSON lines. Configurable via environment variables.
+
+See [server.md](server.md) for detailed documentation.
 
 ## dllb-cli
 
 **Path:** `crates/cli/`
 **Type:** Binary
+**Status:** Implemented (Phase 7 complete)
 
-Interactive REPL for issuing queries. Will use `rustyline` for history and
-tab completion.
+Interactive REPL with rustyline line editing and command history.
+Opens an embedded database directly (no network). Supports `.help`,
+`.quit`/`.exit` commands and `--path`/`--ns`/`--db` arguments.
+
+See [server.md](server.md) for detailed documentation.
