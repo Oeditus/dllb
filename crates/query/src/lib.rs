@@ -4,14 +4,17 @@
 //!
 //! Provides a SQL-like declarative language (inspired by SurrealQL) with:
 //!
-//! - **Parser**: tokenizer and recursive-descent parser producing an AST
-//! - **Planner**: converts the AST into a logical plan (scan, filter,
-//!   project, join, sort, limit)
-//! - **Optimizer**: index selection (B-tree, full-text, HNSW, graph
-//!   traversal), predicate pushdown, limit pushdown
-//! - **Executor**: streaming, batched execution with cross-model support
-//!   -- a single query can combine document filters, graph traversals,
-//!   full-text matches, and vector KNN in one statement
+//! - **Tokenizer**: splits input into keyword/ident/literal/symbol tokens
+//! - **Parser**: hand-written recursive descent producing an AST
+//! - **Executor**: maps AST nodes to crate API calls (Collection, EdgeStore)
 //!
-//! Hybrid ranking uses reciprocal rank fusion (RRF) or weighted linear
-//! combination of vector/text/graph scores.
+//! Supported statements: CREATE, SELECT (with WHERE), DELETE, RELATE.
+//! The `QueryExecutor::run()` method provides a single-call parse+execute.
+
+pub mod ast;
+pub mod executor;
+pub mod parser;
+pub mod tokenizer;
+
+pub use executor::{QueryExecutor, QueryResult};
+pub use parser::parse;

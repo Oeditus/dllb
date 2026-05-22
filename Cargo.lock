@@ -358,9 +358,8 @@ dependencies = [
  "dllb-core",
  "dllb-document",
  "dllb-graph",
- "dllb-search",
  "dllb-storage",
- "dllb-vector",
+ "tempfile",
  "tracing",
 ]
 

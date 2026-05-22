@@ -271,7 +271,7 @@ SELECT id, name,
 - [x] Tantivy full-text integration (BM25 scoring, language stemming, multi-index)
 - [x] HNSW vector index (distance metrics, brute-force baseline, in-memory HNSW with recall tests)
 - [ ] AST/MetaAST code intelligence layer
-- [ ] Query parser and executor
+- [x] Query parser and executor (tokenizer, recursive-descent parser, direct executor)
 - [ ] TCP server and CLI REPL
 
 ### Future

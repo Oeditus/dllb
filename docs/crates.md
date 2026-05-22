@@ -119,11 +119,19 @@ structural pattern recognition.
 ## dllb-query
 
 **Path:** `crates/query/`
-**Status:** Stub (Phase 6)
+**Status:** Implemented (Phase 6 -- minimal viable)
 
-Query engine: SQL-like declarative language parser, logical/physical planner,
-optimizer (index selection, predicate pushdown), streaming batched executor
-with cross-model support (document + graph + full-text + vector).
+SQL-like query engine with tokenizer, recursive-descent parser, and direct
+executor. Supports CREATE, SELECT (with WHERE), DELETE, RELATE.
+
+| Module | Contents |
+|--------|----------|
+| `ast` | `Statement`, `SelectFields`, `FromTarget`, `WhereClause`, `Literal`, `RecordRef` |
+| `tokenizer` | `Token` enum, `tokenize()` -- keywords, idents, literals, symbols |
+| `parser` | `parse()` -- hand-written recursive descent |
+| `executor` | `QueryExecutor`, `QueryResult` -- dispatches to Collection/EdgeStore APIs |
+
+See [query.md](query.md) for detailed documentation.
 
 ## dllb-server
 

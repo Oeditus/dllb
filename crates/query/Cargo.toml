@@ -10,6 +10,7 @@ dllb-core = { workspace = true }
 dllb-storage = { workspace = true }
 dllb-document = { workspace = true }
 dllb-graph = { workspace = true }
-dllb-search = { workspace = true }
-dllb-vector = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
