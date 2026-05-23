@@ -42,17 +42,17 @@ impl Renderer {
         marcli::render(markdown, self.opts())
     }
 
-    /// Render a JSON string as a syntax-highlighted fenced code block.
-    pub fn json(&self, raw: &str) -> String {
-        let pretty = prettify_json(raw);
-        let block = format!("```json\n{pretty}\n```");
+    /// Render a fenced code block with the given language tag.
+    pub fn code(&self, raw: &str, lang: &str) -> String {
+        let content = if lang == "json" { prettify_json(raw) } else { raw.to_string() };
+        let block = format!("```{lang}\n{content}\n```");
         marcli::render(&block, self.opts())
     }
 
-    /// Render an error JSON string (bold heading + highlighted JSON body).
-    pub fn error(&self, raw: &str) -> String {
-        let pretty = prettify_json(raw);
-        let block = format!("**error**\n\n```json\n{pretty}\n```");
+    /// Render an error (bold heading + highlighted code block).
+    pub fn error(&self, raw: &str, lang: &str) -> String {
+        let content = if lang == "json" { prettify_json(raw) } else { raw.to_string() };
+        let block = format!("**error**\n\n```{lang}\n{content}\n```");
         marcli::render(&block, self.opts())
     }
 }

@@ -7,11 +7,12 @@ use dllb_core::{Error, Result};
 use crate::ast::*;
 use crate::tokenizer::{Token, tokenize};
 
-/// Parse an input string into a [`Statement`].
-pub fn parse(input: &str) -> Result<Statement> {
+/// Parse an input string into a [`Query`].
+pub fn parse(input: &str) -> Result<Query> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
-    let stmt = parse_statement(&tokens, &mut pos)?;
+    let statement = parse_statement(&tokens, &mut pos)?;
+    let outcome = parse_outcome(&tokens, &mut pos)?;
     // Optional trailing semicolon.
     if pos < tokens.len() && tokens[pos] == Token::Semicolon {
         pos += 1;
@@ -22,7 +23,7 @@ pub fn parse(input: &str) -> Result<Statement> {
             tokens[pos]
         )));
     }
-    Ok(stmt)
+    Ok(Query { statement, outcome })
 }
 
 fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
@@ -366,14 +367,48 @@ fn expect_ident(tokens: &[Token], pos: &mut usize) -> Result<String> {
     }
 }
 
+/// Parse an optional `OUTCOME JSON|TOON|CSV` clause.
+fn parse_outcome(tokens: &[Token], pos: &mut usize) -> Result<OutcomeFormat> {
+    if !matches!(tokens.get(*pos), Some(Token::Outcome)) {
+        return Ok(OutcomeFormat::default());
+    }
+    *pos += 1;
+    match tokens.get(*pos) {
+        Some(Token::Ident(s)) => {
+            let fmt = match s.to_uppercase().as_str() {
+                "JSON" => OutcomeFormat::Json,
+                "TOON" => OutcomeFormat::Toon,
+                "CSV" => OutcomeFormat::Csv,
+                other => {
+                    return Err(Error::Query(format!(
+                        "unknown outcome format '{other}', expected JSON, TOON, or CSV"
+                    )))
+                }
+            };
+            *pos += 1;
+            Ok(fmt)
+        }
+        Some(t) => Err(Error::Query(format!(
+            "expected outcome format (JSON, TOON, CSV), got {t:?}"
+        ))),
+        None => Err(Error::Query(
+            "unexpected end of input after OUTCOME, expected JSON, TOON, or CSV".into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Helper: unwrap a `Query` to its inner `Statement`.
+    fn stmt(input: &str) -> Statement {
+        parse(input).unwrap().statement
+    }
+
     #[test]
     fn parse_create_with_id() {
-        let stmt = parse("CREATE user:alice SET name = 'Alice', age = 30;").unwrap();
-        match stmt {
+        match stmt("CREATE user:alice SET name = 'Alice', age = 30;") {
             Statement::Create { table, id, fields } => {
                 assert_eq!(table, "user");
                 assert_eq!(id, Some("alice".into()));
@@ -387,8 +422,7 @@ mod tests {
 
     #[test]
     fn parse_select_star() {
-        let stmt = parse("SELECT * FROM user").unwrap();
-        assert!(matches!(stmt, Statement::Select {
+        assert!(matches!(stmt("SELECT * FROM user"), Statement::Select {
             fields: SelectFields::All,
             from: FromTarget::Table(t),
             filter: None,
@@ -397,8 +431,7 @@ mod tests {
 
     #[test]
     fn parse_select_point_lookup() {
-        let stmt = parse("SELECT name FROM user:alice").unwrap();
-        match stmt {
+        match stmt("SELECT name FROM user:alice") {
             Statement::Select {
                 fields: SelectFields::Named(f),
                 from: FromTarget::Record(r),
@@ -414,8 +447,7 @@ mod tests {
 
     #[test]
     fn parse_select_where_eq() {
-        let stmt = parse("SELECT * FROM user WHERE age = 30").unwrap();
-        match stmt {
+        match stmt("SELECT * FROM user WHERE age = 30") {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
@@ -434,8 +466,7 @@ mod tests {
 
     #[test]
     fn parse_select_where_gt() {
-        let stmt = parse("SELECT * FROM user WHERE age > 25").unwrap();
-        match stmt {
+        match stmt("SELECT * FROM user WHERE age > 25") {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
@@ -454,8 +485,7 @@ mod tests {
 
     #[test]
     fn parse_select_where_ne_string() {
-        let stmt = parse("SELECT * FROM user WHERE name != 'Bob'").unwrap();
-        match stmt {
+        match stmt("SELECT * FROM user WHERE name != 'Bob'") {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
@@ -474,8 +504,7 @@ mod tests {
 
     #[test]
     fn parse_select_where_and() {
-        let stmt = parse("SELECT * FROM user WHERE age >= 20 AND age <= 30").unwrap();
-        match stmt {
+        match stmt("SELECT * FROM user WHERE age >= 20 AND age <= 30") {
             Statement::Select {
                 filter: Some(WhereClause::And(left, right)),
                 ..
@@ -489,8 +518,7 @@ mod tests {
 
     #[test]
     fn parse_traversal_single_hop() {
-        let stmt = parse("SELECT ->knows->user FROM user:alice").unwrap();
-        match stmt {
+        match stmt("SELECT ->knows->user FROM user:alice") {
             Statement::Select {
                 fields: SelectFields::Traversal(chain),
                 from: FromTarget::Record(r),
@@ -509,8 +537,7 @@ mod tests {
 
     #[test]
     fn parse_traversal_with_projection() {
-        let stmt = parse("SELECT ->knows->user.name FROM user:alice").unwrap();
-        match stmt {
+        match stmt("SELECT ->knows->user.name FROM user:alice") {
             Statement::Select {
                 fields: SelectFields::Traversal(chain),
                 ..
@@ -523,8 +550,7 @@ mod tests {
 
     #[test]
     fn parse_traversal_incoming() {
-        let stmt = parse("SELECT <-likes<-user FROM user:bob").unwrap();
-        match stmt {
+        match stmt("SELECT <-likes<-user FROM user:bob") {
             Statement::Select {
                 fields: SelectFields::Traversal(chain),
                 ..
@@ -539,8 +565,7 @@ mod tests {
 
     #[test]
     fn parse_traversal_two_hops() {
-        let stmt = parse("SELECT ->knows->user->likes->product.title FROM user:alice").unwrap();
-        match stmt {
+        match stmt("SELECT ->knows->user->likes->product.title FROM user:alice") {
             Statement::Select {
                 fields: SelectFields::Traversal(chain),
                 ..
@@ -558,16 +583,14 @@ mod tests {
 
     #[test]
     fn parse_delete() {
-        let stmt = parse("DELETE user:alice;").unwrap();
         assert!(
-            matches!(stmt, Statement::Delete { table, id } if table == "user" && id == "alice")
+            matches!(stmt("DELETE user:alice;"), Statement::Delete { table, id } if table == "user" && id == "alice")
         );
     }
 
     #[test]
     fn parse_relate() {
-        let stmt = parse("RELATE user:alice->knows->user:bob SET since = 2020;").unwrap();
-        match stmt {
+        match stmt("RELATE user:alice->knows->user:bob SET since = 2020;") {
             Statement::Relate {
                 src,
                 edge_type,
@@ -588,5 +611,42 @@ mod tests {
     #[test]
     fn parse_error_on_garbage() {
         assert!(parse("NONSENSE blah").is_err());
+    }
+
+    // -- OUTCOME tests -------------------------------------------------------
+
+    #[test]
+    fn parse_outcome_default_is_json() {
+        let q = parse("SELECT * FROM user").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Json);
+    }
+
+    #[test]
+    fn parse_outcome_json_explicit() {
+        let q = parse("SELECT * FROM user OUTCOME JSON").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Json);
+    }
+
+    #[test]
+    fn parse_outcome_toon() {
+        let q = parse("SELECT * FROM user OUTCOME TOON;").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Toon);
+    }
+
+    #[test]
+    fn parse_outcome_csv() {
+        let q = parse("SELECT * FROM user WHERE age > 25 OUTCOME CSV").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Csv);
+    }
+
+    #[test]
+    fn parse_outcome_case_insensitive() {
+        let q = parse("SELECT * FROM user outcome csv;").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Csv);
+    }
+
+    #[test]
+    fn parse_outcome_unknown_format() {
+        assert!(parse("SELECT * FROM user OUTCOME XML").is_err());
     }
 }

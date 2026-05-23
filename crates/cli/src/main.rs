@@ -6,7 +6,7 @@
 
 mod render;
 
-use dllb_query::{QueryExecutor, format_error, format_result};
+use dllb_query::{OutcomeFormat, QueryExecutor, format_error, format_result};
 use dllb_storage::db::DllbStorage;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -75,13 +75,24 @@ fn main() {
 
                 let query = trimmed.trim_end_matches(';').trim();
                 match executor.run(query) {
-                    Ok(result) => println!("{}", r.json(&format_result(&result))),
-                    Err(err) => eprintln!("{}", r.error(&format_error(&err))),
+                    Ok((result, outcome)) => {
+                        let lang = outcome_lang(outcome);
+                        println!("{}", r.code(&format_result(&result, outcome), lang));
+                    }
+                    Err(err) => {
+                        eprintln!("{}", r.error(
+                            &format_error(&err, OutcomeFormat::Json),
+                            "json",
+                        ));
+                    }
                 }
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             Err(err) => {
-                eprintln!("{}", r.error(&format!(r#"{{"error":"{err}"}}"#)));
+                eprintln!("{}", r.error(
+                    &format!(r#"{{"error":"{err}"}}"#),
+                    "json",
+                ));
                 break;
             }
         }
@@ -97,4 +108,12 @@ fn get_arg(args: &[String], flag: &str) -> Option<String> {
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
+}
+
+fn outcome_lang(outcome: OutcomeFormat) -> &'static str {
+    match outcome {
+        OutcomeFormat::Json => "json",
+        OutcomeFormat::Toon => "toml",
+        OutcomeFormat::Csv => "csv",
+    }
 }

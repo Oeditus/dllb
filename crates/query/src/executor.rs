@@ -61,9 +61,13 @@ impl<'s> QueryExecutor<'s> {
     }
 
     /// Convenience: parse + execute in one call.
-    pub fn run(&self, query: &str) -> Result<QueryResult> {
-        let stmt = crate::parser::parse(query)?;
-        self.execute(&stmt)
+    ///
+    /// Returns the result together with the `OutcomeFormat` requested by
+    /// the `OUTCOME` clause (defaults to JSON when omitted).
+    pub fn run(&self, query: &str) -> Result<(QueryResult, crate::ast::OutcomeFormat)> {
+        let q = crate::parser::parse(query)?;
+        let result = self.execute(&q.statement)?;
+        Ok((result, q.outcome))
     }
 
     // -------------------------------------------------------------------

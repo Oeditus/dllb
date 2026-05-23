@@ -30,7 +30,7 @@ fn create_and_select_star() {
     e.run("CREATE user:bob SET name = 'Bob', age = 25;")
         .unwrap();
 
-    let result = e.run("SELECT * FROM user;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 2);
@@ -49,7 +49,7 @@ fn create_returns_id() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    let result = e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    let (result, _outcome) = e.run("CREATE user:alice SET name = 'Alice';").unwrap();
     match result {
         QueryResult::Created { id } => {
             assert_eq!(id.table, "user");
@@ -71,7 +71,7 @@ fn select_named_fields() {
     e.run("CREATE user:alice SET name = 'Alice', age = 30;")
         .unwrap();
 
-    let result = e.run("SELECT name FROM user;").unwrap();
+    let (result, _outcome) = e.run("SELECT name FROM user;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -94,7 +94,7 @@ fn select_point_lookup() {
     e.run("CREATE user:alice SET name = 'Alice';").unwrap();
     e.run("CREATE user:bob SET name = 'Bob';").unwrap();
 
-    let result = e.run("SELECT * FROM user:alice;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user:alice;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -109,7 +109,7 @@ fn select_missing_record_returns_empty() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    let result = e.run("SELECT * FROM user:ghost;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user:ghost;").unwrap();
     match result {
         QueryResult::Rows(rows) => assert!(rows.is_empty()),
         _ => panic!("expected Rows"),
@@ -127,14 +127,14 @@ fn delete_removes_record() {
 
     e.run("CREATE user:alice SET name = 'Alice';").unwrap();
 
-    let result = e.run("DELETE user:alice;").unwrap();
+    let (result, _outcome) = e.run("DELETE user:alice;").unwrap();
     match result {
         QueryResult::Deleted { existed } => assert!(existed),
         _ => panic!("expected Deleted"),
     }
 
     // Verify gone.
-    let result = e.run("SELECT * FROM user:alice;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user:alice;").unwrap();
     match result {
         QueryResult::Rows(rows) => assert!(rows.is_empty()),
         _ => panic!("expected Rows"),
@@ -157,7 +157,7 @@ fn select_where_filters() {
     e.run("CREATE user:carol SET name = 'Carol', age = 30;")
         .unwrap();
 
-    let result = e.run("SELECT * FROM user WHERE age = 30;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user WHERE age = 30;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 2);
@@ -178,7 +178,7 @@ fn relate_creates_edge() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    let result = e
+    let (result, _outcome) = e
         .run("RELATE user:alice->knows->user:bob SET since = 2020;")
         .unwrap();
     assert!(matches!(result, QueryResult::Ok));
@@ -219,7 +219,7 @@ fn select_where_gt() {
     e.run("CREATE user:carol SET name = 'Carol', age = 40;")
         .unwrap();
 
-    let result = e.run("SELECT * FROM user WHERE age > 28;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user WHERE age > 28;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 2);
@@ -239,7 +239,7 @@ fn select_where_lt() {
     e.run("CREATE user:alice SET age = 30;").unwrap();
     e.run("CREATE user:bob SET age = 25;").unwrap();
 
-    let result = e.run("SELECT * FROM user WHERE age < 28;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user WHERE age < 28;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -257,7 +257,7 @@ fn select_where_ne() {
     e.run("CREATE user:alice SET name = 'Alice';").unwrap();
     e.run("CREATE user:bob SET name = 'Bob';").unwrap();
 
-    let result = e.run("SELECT * FROM user WHERE name != 'Bob';").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user WHERE name != 'Bob';").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -278,7 +278,7 @@ fn select_where_and_range() {
     e.run("CREATE user:d SET age = 45;").unwrap();
 
     // 20 <= age <= 30
-    let result = e
+    let (result, _outcome) = e
         .run("SELECT * FROM user WHERE age >= 20 AND age <= 30;")
         .unwrap();
     match result {
@@ -308,7 +308,7 @@ fn select_traversal_outgoing() {
     e.run("RELATE user:alice->knows->user:bob;").unwrap();
     e.run("RELATE user:alice->knows->user:carol;").unwrap();
 
-    let result = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
+    let (result, _outcome) = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 2);
@@ -331,7 +331,7 @@ fn select_traversal_with_projection() {
         .unwrap();
     e.run("RELATE user:alice->knows->user:bob;").unwrap();
 
-    let result = e.run("SELECT ->knows->user.name FROM user:alice;").unwrap();
+    let (result, _outcome) = e.run("SELECT ->knows->user.name FROM user:alice;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -354,7 +354,7 @@ fn select_traversal_incoming() {
     e.run("RELATE user:alice->likes->user:bob;").unwrap();
 
     // Who likes bob? (incoming edges)
-    let result = e.run("SELECT <-likes<-user FROM user:bob;").unwrap();
+    let (result, _outcome) = e.run("SELECT <-likes<-user FROM user:bob;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -379,7 +379,7 @@ fn select_traversal_with_where_on_dest() {
     e.run("RELATE user:alice->knows->user:carol;").unwrap();
 
     // Among alice's connections, only those with age > 35.
-    let result = e
+    let (result, _outcome) = e
         .run("SELECT ->knows->user FROM user:alice WHERE age > 35;")
         .unwrap();
     match result {
@@ -399,7 +399,7 @@ fn select_traversal_empty_result() {
     e.run("CREATE user:alice SET name = 'Alice';").unwrap();
 
     // No edges exist yet.
-    let result = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
+    let (result, _outcome) = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
     match result {
         QueryResult::Rows(rows) => assert!(rows.is_empty()),
         _ => panic!("expected Rows"),
@@ -433,7 +433,7 @@ fn select_empty_table() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    let result = e.run("SELECT * FROM empty_table;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM empty_table;").unwrap();
     match result {
         QueryResult::Rows(rows) => assert!(rows.is_empty()),
         _ => panic!("expected Rows"),
@@ -447,7 +447,7 @@ fn create_auto_generates_id() {
 
     // CREATE without :id -- parser currently requires :id or plain table.
     // Using CREATE table SET ... (no colon) should auto-generate.
-    let result = e.run("CREATE user SET name = 'Anonymous';").unwrap();
+    let (result, _outcome) = e.run("CREATE user SET name = 'Anonymous';").unwrap();
     match result {
         QueryResult::Created { id } => {
             assert_eq!(id.table, "user");
@@ -464,7 +464,7 @@ fn unicode_field_values() {
 
     e.run("CREATE user:uni SET name = 'Aleksei';").unwrap();
 
-    let result = e.run("SELECT * FROM user:uni;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM user:uni;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -484,7 +484,7 @@ fn large_document_many_fields() {
     let query = format!("CREATE big:doc SET {};", fields.join(", "));
     e.run(&query).unwrap();
 
-    let result = e.run("SELECT * FROM big:doc;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM big:doc;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
@@ -503,7 +503,7 @@ fn boolean_and_float_values() {
     e.run("CREATE item:x SET active = true, score = 3.14;")
         .unwrap();
 
-    let result = e.run("SELECT * FROM item:x;").unwrap();
+    let (result, _outcome) = e.run("SELECT * FROM item:x;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows[0].get("active"), Some(&Value::Bool(true)));

@@ -1,5 +1,24 @@
 //! Abstract Syntax Tree types for the dllb query language.
 
+/// Requested output format for a query result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutcomeFormat {
+    /// JSON (the default wire format).
+    #[default]
+    Json,
+    /// TOON -- TOML Object Notation.
+    Toon,
+    /// Comma-separated values.
+    Csv,
+}
+
+/// A parsed query: statement plus optional output format.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Query {
+    pub statement: Statement,
+    pub outcome: OutcomeFormat,
+}
+
 /// A parsed query statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {

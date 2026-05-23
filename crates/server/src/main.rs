@@ -55,8 +55,8 @@ async fn main() {
 
                 let executor = QueryExecutor::new(&storage, &ns, &db);
                 let response = match executor.run(query) {
-                    Ok(result) => format_result(&result),
-                    Err(err) => format_error(&err),
+                    Ok((result, outcome)) => format_result(&result, outcome),
+                    Err(err) => format_error(&err, dllb_query::OutcomeFormat::Json),
                 };
 
                 if writer

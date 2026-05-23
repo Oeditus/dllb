@@ -17,6 +17,7 @@ pub mod format;
 pub mod parser;
 pub mod tokenizer;
 
+pub use ast::{OutcomeFormat, Query};
 pub use executor::{QueryExecutor, QueryResult};
 pub use format::{format_error, format_result};
 pub use parser::parse;

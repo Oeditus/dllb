@@ -16,6 +16,7 @@ pub enum Token {
     Where,
     Set,
     And,
+    Outcome,
     // Literals
     Ident(String),
     StringLit(String),
@@ -214,6 +215,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 "WHERE" => Token::Where,
                 "SET" => Token::Set,
                 "AND" => Token::And,
+                "OUTCOME" => Token::Outcome,
                 "TRUE" => Token::True,
                 "FALSE" => Token::False,
                 "NONE" | "NULL" => Token::None,
