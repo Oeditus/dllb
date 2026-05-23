@@ -15,7 +15,7 @@ use dllb_storage::db::DllbStorage;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let bind = std::env::var("DLLB_BIND").unwrap_or_else(|_| "127.0.0.1:9800".into());
+    let bind = std::env::var("DLLB_BIND").unwrap_or_else(|_| "127.0.0.1:3009".into());
     let db_path = std::env::var("DLLB_PATH").unwrap_or_else(|_| "dllb.redb".into());
     let ns = std::env::var("DLLB_NS").unwrap_or_else(|_| "default".into());
     let db = std::env::var("DLLB_DB").unwrap_or_else(|_| "default".into());

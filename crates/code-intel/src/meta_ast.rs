@@ -23,8 +23,8 @@ pub enum Layer {
 
 /// All MetaAST node types from the specification.
 ///
-/// Covers M2.1 Core (18 types), M2.2 Extended (10 types),
-/// M2.2s Structural (8 types), M2.3 Native (1 type), and Special (1 type).
+/// Covers M2.1 Core (19 types), M2.2 Extended (14 types),
+/// M2.2s Structural (11 types), M2.3 Native (1 type), and Special (1 type).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeType {
     // -- M2.1 Core (all languages) --
@@ -35,6 +35,7 @@ pub enum NodeType {
     FunctionCall,
     Conditional,
     EarlyReturn,
+    Throw,
     Block,
     List,
     Map,
@@ -55,9 +56,13 @@ pub enum NodeType {
     MatchArm,
     ExceptionHandling,
     AsyncOperation,
+    Yield,
     Comprehension,
     Generator,
     Filter,
+    Pipe,
+    Pin,
+    AssertType,
 
     // -- M2.2s Structural (organizational) --
     Container,
@@ -68,6 +73,9 @@ pub enum NodeType {
     Property,
     Import,
     TypeAnnotation,
+    Decorator,
+    RecordUpdate,
+    ChildSpec,
 
     // -- M2.3 Native (language-specific) --
     LanguageSpecific,
@@ -89,6 +97,7 @@ impl NodeType {
             | NodeType::FunctionCall
             | NodeType::Conditional
             | NodeType::EarlyReturn
+            | NodeType::Throw
             | NodeType::Block
             | NodeType::List
             | NodeType::Map
@@ -109,9 +118,13 @@ impl NodeType {
             | NodeType::MatchArm
             | NodeType::ExceptionHandling
             | NodeType::AsyncOperation
+            | NodeType::Yield
             | NodeType::Comprehension
             | NodeType::Generator
-            | NodeType::Filter => Layer::Extended,
+            | NodeType::Filter
+            | NodeType::Pipe
+            | NodeType::Pin
+            | NodeType::AssertType => Layer::Extended,
 
             // Structural
             NodeType::Container
@@ -121,7 +134,10 @@ impl NodeType {
             | NodeType::AugmentedAssignment
             | NodeType::Property
             | NodeType::Import
-            | NodeType::TypeAnnotation => Layer::Structural,
+            | NodeType::TypeAnnotation
+            | NodeType::Decorator
+            | NodeType::RecordUpdate
+            | NodeType::ChildSpec => Layer::Structural,
 
             NodeType::LanguageSpecific => Layer::Native,
             NodeType::Wildcard => Layer::Special,
@@ -138,6 +154,7 @@ impl NodeType {
             NodeType::FunctionCall => "function_call",
             NodeType::Conditional => "conditional",
             NodeType::EarlyReturn => "early_return",
+            NodeType::Throw => "throw",
             NodeType::Block => "block",
             NodeType::List => "list",
             NodeType::Map => "map",
@@ -156,9 +173,13 @@ impl NodeType {
             NodeType::MatchArm => "match_arm",
             NodeType::ExceptionHandling => "exception_handling",
             NodeType::AsyncOperation => "async_operation",
+            NodeType::Yield => "yield",
             NodeType::Comprehension => "comprehension",
             NodeType::Generator => "generator",
             NodeType::Filter => "filter",
+            NodeType::Pipe => "pipe",
+            NodeType::Pin => "pin",
+            NodeType::AssertType => "assert_type",
             NodeType::Container => "container",
             NodeType::FunctionDef => "function_def",
             NodeType::Param => "param",
@@ -167,6 +188,9 @@ impl NodeType {
             NodeType::Property => "property",
             NodeType::Import => "import",
             NodeType::TypeAnnotation => "type_annotation",
+            NodeType::Decorator => "decorator",
+            NodeType::RecordUpdate => "record_update",
+            NodeType::ChildSpec => "child_spec",
             NodeType::LanguageSpecific => "language_specific",
             NodeType::Wildcard => "_",
         }
@@ -182,6 +206,7 @@ impl NodeType {
             "function_call" => Some(NodeType::FunctionCall),
             "conditional" => Some(NodeType::Conditional),
             "early_return" => Some(NodeType::EarlyReturn),
+            "throw" => Some(NodeType::Throw),
             "block" => Some(NodeType::Block),
             "list" => Some(NodeType::List),
             "map" => Some(NodeType::Map),
@@ -200,9 +225,13 @@ impl NodeType {
             "match_arm" => Some(NodeType::MatchArm),
             "exception_handling" => Some(NodeType::ExceptionHandling),
             "async_operation" => Some(NodeType::AsyncOperation),
+            "yield" => Some(NodeType::Yield),
             "comprehension" => Some(NodeType::Comprehension),
             "generator" => Some(NodeType::Generator),
             "filter" => Some(NodeType::Filter),
+            "pipe" => Some(NodeType::Pipe),
+            "pin" => Some(NodeType::Pin),
+            "assert_type" => Some(NodeType::AssertType),
             "container" => Some(NodeType::Container),
             "function_def" => Some(NodeType::FunctionDef),
             "param" => Some(NodeType::Param),
@@ -211,6 +240,9 @@ impl NodeType {
             "property" => Some(NodeType::Property),
             "import" => Some(NodeType::Import),
             "type_annotation" => Some(NodeType::TypeAnnotation),
+            "decorator" => Some(NodeType::Decorator),
+            "record_update" => Some(NodeType::RecordUpdate),
+            "child_spec" => Some(NodeType::ChildSpec),
             "language_specific" => Some(NodeType::LanguageSpecific),
             "_" => Some(NodeType::Wildcard),
             _ => None,
@@ -315,7 +347,7 @@ mod tests {
 
     #[test]
     fn all_node_types_have_atom_names() {
-        // Verify the full 38 node types are covered.
+        // Verify the full 46 node types are covered (45 Metastatic + wildcard).
         let types = [
             NodeType::Literal,
             NodeType::Variable,
@@ -324,6 +356,7 @@ mod tests {
             NodeType::FunctionCall,
             NodeType::Conditional,
             NodeType::EarlyReturn,
+            NodeType::Throw,
             NodeType::Block,
             NodeType::List,
             NodeType::Map,
@@ -342,9 +375,13 @@ mod tests {
             NodeType::MatchArm,
             NodeType::ExceptionHandling,
             NodeType::AsyncOperation,
+            NodeType::Yield,
             NodeType::Comprehension,
             NodeType::Generator,
             NodeType::Filter,
+            NodeType::Pipe,
+            NodeType::Pin,
+            NodeType::AssertType,
             NodeType::Container,
             NodeType::FunctionDef,
             NodeType::Param,
@@ -353,10 +390,13 @@ mod tests {
             NodeType::Property,
             NodeType::Import,
             NodeType::TypeAnnotation,
+            NodeType::Decorator,
+            NodeType::RecordUpdate,
+            NodeType::ChildSpec,
             NodeType::LanguageSpecific,
             NodeType::Wildcard,
         ];
-        assert_eq!(types.len(), 38);
+        assert_eq!(types.len(), 46);
         for t in &types {
             let name = t.atom_name();
             assert!(!name.is_empty());
@@ -367,8 +407,16 @@ mod tests {
     #[test]
     fn layer_classification() {
         assert_eq!(NodeType::Literal.layer(), Layer::Core);
+        assert_eq!(NodeType::Throw.layer(), Layer::Core);
         assert_eq!(NodeType::Loop.layer(), Layer::Extended);
+        assert_eq!(NodeType::Yield.layer(), Layer::Extended);
+        assert_eq!(NodeType::Pipe.layer(), Layer::Extended);
+        assert_eq!(NodeType::Pin.layer(), Layer::Extended);
+        assert_eq!(NodeType::AssertType.layer(), Layer::Extended);
         assert_eq!(NodeType::Container.layer(), Layer::Structural);
+        assert_eq!(NodeType::Decorator.layer(), Layer::Structural);
+        assert_eq!(NodeType::RecordUpdate.layer(), Layer::Structural);
+        assert_eq!(NodeType::ChildSpec.layer(), Layer::Structural);
         assert_eq!(NodeType::LanguageSpecific.layer(), Layer::Native);
         assert_eq!(NodeType::Wildcard.layer(), Layer::Special);
     }

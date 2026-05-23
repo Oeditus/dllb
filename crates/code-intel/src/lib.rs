@@ -4,10 +4,10 @@
 //!
 //! Rust-native companion to the Elixir [metastatic](https://github.com/Oeditus/metastatic)
 //! library. Provides MetaAST types faithful to the METAST_SPEC.md
-//! specification, covering all 38 node types across four meta-modeling
+//! specification, covering all 46 node types across four meta-modeling
 //! layers (M2.1 Core, M2.2 Extended, M2.2s Structural, M2.3 Native).
 //!
-//! - [`meta_ast`]: `MetaNode`, `NodeType` (38 variants), `MetaValue`,
+//! - [`meta_ast`]: `MetaNode`, `NodeType` (46 variants), `MetaValue`,
 //!   `NodeChildren`, `Layer` -- the complete MetaAST type system
 //! - [`tokenizer`]: code-aware tokenizer splitting camelCase/snake_case,
 //!   stripping noise keywords, suitable for Tantivy full-text indexing
