@@ -64,11 +64,33 @@ All of the following must pass before every commit:
 2. `cargo clippy --workspace -- -D warnings` -- 0 warnings
 3. `cargo fmt --all --check` -- 0 formatting issues
 
-## Future: Benchmarks
+## Benchmarks
 
-Performance benchmarks (criterion) are planned but not yet implemented:
-- Storage: put/get throughput at 1K-10K operations
-- Document: create/scan throughput
-- Graph: edge creation + traversal latency
-- Search: index 1K documents + search latency
-- Vector: HNSW insert 10K vectors + KNN query latency
+Performance benchmarks use [Criterion](https://github.com/bheisler/criterion.rs).
+Each crate has a `benches/` directory.
+
+Run all benchmarks:
+
+```bash
+cargo bench --workspace
+```
+
+Run a single crate:
+
+```bash
+cargo bench -p dllb-storage
+cargo bench -p dllb-document
+cargo bench -p dllb-graph
+cargo bench -p dllb-search
+cargo bench -p dllb-vector
+```
+
+HTML reports are written to `target/criterion/`.
+
+| Crate | Benchmark groups | What is measured |
+|---|---|---|
+| dllb-storage | `storage/put`, `storage/get`, `storage/scan` | Single put, batch put (1K/10K), single get, prefix scan (100/1K) |
+| dllb-document | `document/create`, `document/scan` | Sequential create (100/1K docs), scan_all (100/1K docs) |
+| dllb-graph | `graph/relate`, `graph/traverse` | Edge creation (100/1K), outgoing fan-out (10/100), 2-hop walk |
+| dllb-search | `search/index`, `search/query` | Index throughput (100/1K docs + commit), BM25 top-10 latency |
+| dllb-vector | `vector/distance`, `vector/hnsw_insert`, `vector/hnsw_search`, `vector/brute_force` | Cosine/Euclidean/dot-product at 128D and 768D; HNSW build 1K/10K; KNN-10 latency; brute-force baseline |

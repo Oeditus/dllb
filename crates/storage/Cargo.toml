@@ -20,3 +20,8 @@ tracing = { workspace = true }
 tempfile = "3"
 dllb-document = { workspace = true }
 dllb-graph = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "storage"
+harness = false
