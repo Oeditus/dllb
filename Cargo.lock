@@ -326,7 +326,11 @@ name = "dllb-code-intel"
 version = "0.1.0"
 dependencies = [
  "dllb-core",
+ "dllb-document",
+ "dllb-graph",
+ "dllb-storage",
  "serde",
+ "tempfile",
  "tracing",
 ]
 

@@ -110,11 +110,20 @@ See [vectors.md](vectors.md) for detailed documentation.
 ## dllb-code-intel
 
 **Path:** `crates/code-intel/`
-**Status:** Stub (Phase 5b)
+**Status:** Implemented (Phase 5b complete)
 
-AST/MetaAST code intelligence layer: predefined schemas for source code nodes,
-code-aware tokenizer (camelCase/snake_case splitting), cross-repository
-structural pattern recognition.
+Rust-native companion to the Elixir metastatic library. MetaAST types
+faithful to METAST_SPEC.md, code-aware tokenizer, predefined schemas,
+and structural extraction utilities.
+
+| Module | Contents |
+|--------|----------|
+| `meta_ast` | `NodeType` (38 variants), `MetaNode`, `MetaValue`, `NodeChildren`, `Layer` |
+| `tokenizer` | `code_tokenize()` -- camelCase/snake_case splitting, noise keyword stripping |
+| `schemas` | `ast_node_schema()` (11-field TableDefinition), 6 edge type constants |
+| `extract` | `walk()`, `extract_functions()`, `extract_imports()`, `extract_variables()`, `extract_calls()`, `node_count()`, `depth()` |
+
+See [code-intel.md](code-intel.md) for detailed documentation.
 
 ## dllb-query
 

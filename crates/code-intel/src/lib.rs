@@ -2,19 +2,25 @@
 //!
 //! AST/MetaAST code intelligence layer for dllb.
 //!
-//! This crate makes dllb a first-class store for program structure and
-//! code embeddings. It provides:
+//! Rust-native companion to the Elixir [metastatic](https://github.com/Oeditus/metastatic)
+//! library. Provides MetaAST types faithful to the METAST_SPEC.md
+//! specification, covering all 38 node types across four meta-modeling
+//! layers (M2.1 Core, M2.2 Extended, M2.2s Structural, M2.3 Native).
 //!
-//! - Predefined schemas for AST nodes (function, class, module, trait)
-//!   with fields for source text, signature, file path, and embeddings
-//! - A code-aware tokenizer for Tantivy that splits on camelCase and
-//!   snake_case boundaries (e.g., `parseJSON` -> `parse`, `json`)
-//! - MetaAST: cross-repository structural pattern recognition, storing
-//!   recurring patterns (builder, retry, observer) as documents and
-//!   graph edges
-//!
-//! Source code maps onto the multi-model primitives:
-//! - Documents: AST nodes with source_embedding and structure_embedding
-//! - Graph edges: call graph, containment, imports, type references
-//! - Full-text: source code indexed with the code-aware tokenizer
-//! - Vectors: CodeBERT/StarCoder embeddings for semantic similarity
+//! - [`meta_ast`]: `MetaNode`, `NodeType` (38 variants), `MetaValue`,
+//!   `NodeChildren`, `Layer` -- the complete MetaAST type system
+//! - [`tokenizer`]: code-aware tokenizer splitting camelCase/snake_case,
+//!   stripping noise keywords, suitable for Tantivy full-text indexing
+//! - [`schemas`]: predefined `TableDefinition` for AST nodes with 11
+//!   fields (including vector embedding fields), and 6 edge type constants
+//! - [`extract`]: tree walking, function/import/variable/call extraction
+
+pub mod extract;
+pub mod meta_ast;
+pub mod schemas;
+pub mod tokenizer;
+
+pub use extract::{FunctionInfo, ImportInfo};
+pub use meta_ast::{Layer, MetaNode, MetaValue, NodeChildren, NodeType};
+pub use schemas::{ALL_EDGE_TYPES, ast_node_schema};
+pub use tokenizer::code_tokenize;
