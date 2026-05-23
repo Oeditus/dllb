@@ -383,8 +383,12 @@ mod tests {
         let key = graph_edge_key("ns", "db", "edge", "alice", "knows", "bob");
         let parts = parse_key(&key).unwrap();
         assert_eq!(parts.tag, tag::GRAPH_EDGE);
+        // remainder = "alice\0>knows\0bob" (direction-aware format)
         let segs: Vec<&[u8]> = parts.remainder.splitn(3, |&b| b == SEPARATOR).collect();
-        assert_eq!(segs, vec![b"alice".as_slice(), b"knows", b"bob"]);
+        assert_eq!(segs[0], b"alice");
+        assert!(segs[1].starts_with(&[dir::OUTGOING])); // > prefix
+        assert_eq!(&segs[1][1..], b"knows");
+        assert_eq!(segs[2], b"bob");
     }
 
     #[test]

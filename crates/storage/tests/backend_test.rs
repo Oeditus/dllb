@@ -188,29 +188,14 @@ fn dllb_storage_graph_edges_sorted() {
     storage.put(&e2, b"").unwrap();
     storage.put(&e3, b"").unwrap();
 
-    // Scan all edges from alice.
-    let prefix = key::KeyBuilder::new()
-        .namespace("ns")
-        .database("db")
-        .table("edges")
-        .tag(key::tag::GRAPH_EDGE)
-        .segment(b"alice")
-        .build();
-
+    // Scan all outgoing edges from alice.
+    let prefix = key::vertex_outgoing_prefix("ns", "db", "edges", "alice");
     let results = storage.prefix_scan(&prefix).unwrap();
     // All 3 edges from alice (knows->bob, knows->carol, likes->dave).
     assert_eq!(results.len(), 3);
 
     // Scan only "knows" edges from alice.
-    let knows_prefix = key::KeyBuilder::new()
-        .namespace("ns")
-        .database("db")
-        .table("edges")
-        .tag(key::tag::GRAPH_EDGE)
-        .segment(b"alice")
-        .segment(b"knows")
-        .build();
-
+    let knows_prefix = key::vertex_outgoing_typed_prefix("ns", "db", "edges", "alice", "knows");
     let knows_results = storage.prefix_scan(&knows_prefix).unwrap();
     assert_eq!(knows_results.len(), 2);
 }

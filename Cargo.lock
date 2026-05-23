@@ -413,6 +413,8 @@ dependencies = [
  "bytes",
  "crc32fast",
  "dllb-core",
+ "dllb-document",
+ "dllb-graph",
  "joerl",
  "redb",
  "tempfile",

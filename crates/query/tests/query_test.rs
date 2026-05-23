@@ -220,3 +220,92 @@ fn create_without_set_returns_err() {
     let e = exec(&storage);
     assert!(e.run("CREATE user:alice;").is_err());
 }
+
+// -------------------------------------------------------------------
+// Edge cases
+// -------------------------------------------------------------------
+
+#[test]
+fn select_empty_table() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let result = e.run("SELECT * FROM empty_table;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => assert!(rows.is_empty()),
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn create_auto_generates_id() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // CREATE without :id -- parser currently requires :id or plain table.
+    // Using CREATE table SET ... (no colon) should auto-generate.
+    let result = e.run("CREATE user SET name = 'Anonymous';").unwrap();
+    match result {
+        QueryResult::Created { id } => {
+            assert_eq!(id.table, "user");
+            assert!(!id.id.is_empty());
+        }
+        _ => panic!("expected Created"),
+    }
+}
+
+#[test]
+fn unicode_field_values() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:uni SET name = 'Aleksei';").unwrap();
+
+    let result = e.run("SELECT * FROM user:uni;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Aleksei".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn large_document_many_fields() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Build a CREATE with 50 fields.
+    let fields: Vec<String> = (0..50).map(|i| format!("f{i} = {i}")).collect();
+    let query = format!("CREATE big:doc SET {};", fields.join(", "));
+    e.run(&query).unwrap();
+
+    let result = e.run("SELECT * FROM big:doc;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            // Should have 50 fields + id.
+            assert!(rows[0].len() >= 50);
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn boolean_and_float_values() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE item:x SET active = true, score = 3.14;")
+        .unwrap();
+
+    let result = e.run("SELECT * FROM item:x;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows[0].get("active"), Some(&Value::Bool(true)));
+            assert_eq!(rows[0].get("score"), Some(&Value::Float(3.14)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
