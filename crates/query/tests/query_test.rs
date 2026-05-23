@@ -204,6 +204,209 @@ fn relate_traversable() {
 }
 
 // -------------------------------------------------------------------
+// WHERE range comparisons
+// -------------------------------------------------------------------
+
+#[test]
+fn select_where_gt() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+    e.run("CREATE user:bob SET name = 'Bob', age = 25;")
+        .unwrap();
+    e.run("CREATE user:carol SET name = 'Carol', age = 40;")
+        .unwrap();
+
+    let result = e.run("SELECT * FROM user WHERE age > 28;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            let names: Vec<&Value> = rows.iter().filter_map(|r| r.get("name")).collect();
+            assert!(names.contains(&&Value::String("Alice".into())));
+            assert!(names.contains(&&Value::String("Carol".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_where_lt() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET age = 30;").unwrap();
+    e.run("CREATE user:bob SET age = 25;").unwrap();
+
+    let result = e.run("SELECT * FROM user WHERE age < 28;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(25)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_where_ne() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    e.run("CREATE user:bob SET name = 'Bob';").unwrap();
+
+    let result = e.run("SELECT * FROM user WHERE name != 'Bob';").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_where_and_range() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 18;").unwrap();
+    e.run("CREATE user:b SET age = 25;").unwrap();
+    e.run("CREATE user:c SET age = 35;").unwrap();
+    e.run("CREATE user:d SET age = 45;").unwrap();
+
+    // 20 <= age <= 30
+    let result = e
+        .run("SELECT * FROM user WHERE age >= 20 AND age <= 30;")
+        .unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(25)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+// -------------------------------------------------------------------
+// Graph traversal SELECT
+// -------------------------------------------------------------------
+
+#[test]
+fn select_traversal_outgoing() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Create records (destination records must exist for lookup).
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    e.run("CREATE user:bob SET name = 'Bob';").unwrap();
+    e.run("CREATE user:carol SET name = 'Carol';").unwrap();
+
+    // Alice knows Bob and Carol.
+    e.run("RELATE user:alice->knows->user:bob;").unwrap();
+    e.run("RELATE user:alice->knows->user:carol;").unwrap();
+
+    let result = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            let names: Vec<&Value> = rows.iter().filter_map(|r| r.get("name")).collect();
+            assert!(names.contains(&&Value::String("Bob".into())));
+            assert!(names.contains(&&Value::String("Carol".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_traversal_with_projection() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+    e.run("CREATE user:bob SET name = 'Bob', age = 25;")
+        .unwrap();
+    e.run("RELATE user:alice->knows->user:bob;").unwrap();
+
+    let result = e.run("SELECT ->knows->user.name FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            // Projection: only "name" and "id" should be present.
+            assert!(rows[0].contains_key("name"));
+            assert!(!rows[0].contains_key("age"));
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Bob".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_traversal_incoming() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    e.run("CREATE user:bob SET name = 'Bob';").unwrap();
+    e.run("RELATE user:alice->likes->user:bob;").unwrap();
+
+    // Who likes bob? (incoming edges)
+    let result = e.run("SELECT <-likes<-user FROM user:bob;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_traversal_with_where_on_dest() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+    e.run("CREATE user:bob SET name = 'Bob', age = 25;")
+        .unwrap();
+    e.run("CREATE user:carol SET name = 'Carol', age = 40;")
+        .unwrap();
+    e.run("RELATE user:alice->knows->user:bob;").unwrap();
+    e.run("RELATE user:alice->knows->user:carol;").unwrap();
+
+    // Among alice's connections, only those with age > 35.
+    let result = e
+        .run("SELECT ->knows->user FROM user:alice WHERE age > 35;")
+        .unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Carol".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_traversal_empty_result() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+
+    // No edges exist yet.
+    let result = e.run("SELECT ->knows->user FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => assert!(rows.is_empty()),
+        _ => panic!("expected Rows"),
+    }
+}
+
+// -------------------------------------------------------------------
 // Parse errors
 // -------------------------------------------------------------------
 

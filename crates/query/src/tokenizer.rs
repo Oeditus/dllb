@@ -30,7 +30,13 @@ pub enum Token {
     Semicolon, // ;
     Colon,     // :
     Eq,        // =
+    Ne,        // !=
+    Gt,        // >
+    Lt,        // <
+    Gte,       // >=
+    Lte,       // <=
     Arrow,     // ->
+    BackArrow, // <-
     Dot,       // .
 }
 
@@ -59,6 +65,37 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
+            continue;
+        }
+
+        // Operators that require a two-character lookahead.
+        // Order matters: longer matches must be checked before shorter ones.
+
+        // BackArrow <-
+        if c == '<' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            tokens.push(Token::BackArrow);
+            i += 2;
+            continue;
+        }
+
+        // Lte <=
+        if c == '<' && i + 1 < chars.len() && chars[i + 1] == '=' {
+            tokens.push(Token::Lte);
+            i += 2;
+            continue;
+        }
+
+        // Gte >=
+        if c == '>' && i + 1 < chars.len() && chars[i + 1] == '=' {
+            tokens.push(Token::Gte);
+            i += 2;
+            continue;
+        }
+
+        // Ne !=
+        if c == '!' && i + 1 < chars.len() && chars[i + 1] == '=' {
+            tokens.push(Token::Ne);
+            i += 2;
             continue;
         }
 
@@ -101,14 +138,25 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 i += 1;
                 continue;
             }
+            '>' => {
+                tokens.push(Token::Gt);
+                i += 1;
+                continue;
+            }
+            '<' => {
+                tokens.push(Token::Lt);
+                i += 1;
+                continue;
+            }
             _ => {}
         }
 
-        // String literal (single-quoted).
-        if c == '\'' {
+        // String literal (single- or double-quoted).
+        if c == '\'' || c == '"' {
+            let quote = c;
             i += 1;
             let start = i;
-            while i < chars.len() && chars[i] != '\'' {
+            while i < chars.len() && chars[i] != quote {
                 i += 1;
             }
             if i >= chars.len() {
@@ -232,7 +280,78 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_double_quoted_string() {
+        let tokens = tokenize(r#"CREATE user SET name = "Alice""#).unwrap();
+        assert_eq!(tokens[5], Token::StringLit("Alice".into()));
+    }
+
+    #[test]
     fn tokenize_unterminated_string() {
         assert!(tokenize("'hello").is_err());
+        assert!(tokenize("\"hello").is_err());
+    }
+
+    #[test]
+    fn tokenize_comparison_operators() {
+        let t = tokenize("age != 30").unwrap();
+        assert_eq!(
+            t,
+            vec![Token::Ident("age".into()), Token::Ne, Token::IntLit(30)]
+        );
+
+        let t = tokenize("age > 30").unwrap();
+        assert_eq!(
+            t,
+            vec![Token::Ident("age".into()), Token::Gt, Token::IntLit(30)]
+        );
+
+        let t = tokenize("age < 30").unwrap();
+        assert_eq!(
+            t,
+            vec![Token::Ident("age".into()), Token::Lt, Token::IntLit(30)]
+        );
+
+        let t = tokenize("age >= 30").unwrap();
+        assert_eq!(
+            t,
+            vec![Token::Ident("age".into()), Token::Gte, Token::IntLit(30)]
+        );
+
+        let t = tokenize("age <= 30").unwrap();
+        assert_eq!(
+            t,
+            vec![Token::Ident("age".into()), Token::Lte, Token::IntLit(30)]
+        );
+    }
+
+    #[test]
+    fn tokenize_back_arrow() {
+        let t = tokenize("<-likes<-user").unwrap();
+        assert_eq!(
+            t,
+            vec![
+                Token::BackArrow,
+                Token::Ident("likes".into()),
+                Token::BackArrow,
+                Token::Ident("user".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_traversal_chain() {
+        // ->knows->user.name
+        let t = tokenize("->knows->user.name").unwrap();
+        assert_eq!(
+            t,
+            vec![
+                Token::Arrow,
+                Token::Ident("knows".into()),
+                Token::Arrow,
+                Token::Ident("user".into()),
+                Token::Dot,
+                Token::Ident("name".into()),
+            ]
+        );
     }
 }

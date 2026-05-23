@@ -68,6 +68,12 @@ fn parse_select(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     let fields = if matches!(tokens.get(*pos), Some(Token::Star)) {
         *pos += 1;
         SelectFields::All
+    } else if matches!(
+        tokens.get(*pos),
+        Some(Token::Arrow) | Some(Token::BackArrow)
+    ) {
+        // Graph traversal: ->edge->table[.field]  or  <-edge<-table[.field]
+        SelectFields::Traversal(parse_traversal_chain(tokens, pos)?)
     } else {
         let mut names = vec![expect_ident(tokens, pos)?];
         while matches!(tokens.get(*pos), Some(Token::Comma)) {
@@ -95,6 +101,77 @@ fn parse_select(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         from,
         filter,
     })
+}
+
+// -----------------------------------------------------------------------
+// Traversal chain:  ->edge->dest[->edge->dest...][.field]
+//                  <-edge<-dest[<-edge<-dest...][.field]
+// -----------------------------------------------------------------------
+
+fn parse_traversal_chain(tokens: &[Token], pos: &mut usize) -> Result<TraversalChain> {
+    let mut hops = Vec::new();
+
+    loop {
+        // Each hop starts with an Arrow or BackArrow.
+        let dir = match tokens.get(*pos) {
+            Some(Token::Arrow) => {
+                *pos += 1;
+                TraversalDirection::Out
+            }
+            Some(Token::BackArrow) => {
+                *pos += 1;
+                TraversalDirection::In
+            }
+            _ => break,
+        };
+
+        let edge_type = expect_ident(tokens, pos)?;
+
+        // Closing arrow must match the opening direction.
+        match (&dir, tokens.get(*pos)) {
+            (TraversalDirection::Out, Some(Token::Arrow)) => *pos += 1,
+            (TraversalDirection::In, Some(Token::BackArrow)) => *pos += 1,
+            (_, Some(t)) => {
+                return Err(Error::Query(format!(
+                    "traversal: expected matching arrow after edge type, got {t:?}"
+                )));
+            }
+            (_, None) => {
+                return Err(Error::Query(
+                    "traversal: unexpected end after edge type".into(),
+                ));
+            }
+        }
+
+        let dest_table = expect_ident(tokens, pos)?;
+        hops.push(TraversalHop {
+            direction: dir,
+            edge_type,
+            dest_table,
+        });
+
+        // Continue only if the next token starts another hop.
+        if !matches!(
+            tokens.get(*pos),
+            Some(Token::Arrow) | Some(Token::BackArrow)
+        ) {
+            break;
+        }
+    }
+
+    if hops.is_empty() {
+        return Err(Error::Query("empty traversal chain".into()));
+    }
+
+    // Optional field projection: .field_name
+    let projection = if matches!(tokens.get(*pos), Some(Token::Dot)) {
+        *pos += 1;
+        Some(expect_ident(tokens, pos)?)
+    } else {
+        None
+    };
+
+    Ok(TraversalChain { hops, projection })
 }
 
 // -----------------------------------------------------------------------
@@ -168,10 +245,62 @@ fn parse_where_clause(tokens: &[Token], pos: &mut usize) -> Result<Option<WhereC
         return Ok(None);
     }
     *pos += 1;
+    Ok(Some(parse_where_expr(tokens, pos)?))
+}
+
+/// Parse a WHERE expression with optional AND chaining (right-associative).
+fn parse_where_expr(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
+    let left = parse_comparison(tokens, pos)?;
+    if matches!(tokens.get(*pos), Some(Token::And)) {
+        *pos += 1;
+        let right = parse_where_expr(tokens, pos)?;
+        return Ok(WhereClause::And(Box::new(left), Box::new(right)));
+    }
+    Ok(left)
+}
+
+/// Parse a single `field op literal` comparison.
+fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
     let field = expect_ident(tokens, pos)?;
-    expect(tokens, pos, &Token::Eq)?;
+    let op = parse_cmp_op(tokens, pos)?;
     let value = parse_literal(tokens, pos)?;
-    Ok(Some(WhereClause::Eq { field, value }))
+    Ok(WhereClause::Cmp { field, op, value })
+}
+
+/// Parse a comparison operator token.
+fn parse_cmp_op(tokens: &[Token], pos: &mut usize) -> Result<CmpOp> {
+    match tokens.get(*pos) {
+        Some(Token::Eq) => {
+            *pos += 1;
+            Ok(CmpOp::Eq)
+        }
+        Some(Token::Ne) => {
+            *pos += 1;
+            Ok(CmpOp::Ne)
+        }
+        Some(Token::Gt) => {
+            *pos += 1;
+            Ok(CmpOp::Gt)
+        }
+        Some(Token::Lt) => {
+            *pos += 1;
+            Ok(CmpOp::Lt)
+        }
+        Some(Token::Gte) => {
+            *pos += 1;
+            Ok(CmpOp::Gte)
+        }
+        Some(Token::Lte) => {
+            *pos += 1;
+            Ok(CmpOp::Lte)
+        }
+        Some(t) => Err(Error::Query(format!(
+            "expected comparison operator (=, !=, >, <, >=, <=), got {t:?}"
+        ))),
+        None => Err(Error::Query(
+            "unexpected end of input, expected comparison operator".into(),
+        )),
+    }
 }
 
 fn parse_literal(tokens: &[Token], pos: &mut usize) -> Result<Literal> {
@@ -284,17 +413,146 @@ mod tests {
     }
 
     #[test]
-    fn parse_select_where() {
+    fn parse_select_where_eq() {
         let stmt = parse("SELECT * FROM user WHERE age = 30").unwrap();
         match stmt {
             Statement::Select {
-                filter: Some(WhereClause::Eq { field, value }),
+                filter:
+                    Some(WhereClause::Cmp {
+                        field,
+                        op: CmpOp::Eq,
+                        value,
+                    }),
                 ..
             } => {
                 assert_eq!(field, "age");
                 assert_eq!(value, Literal::Int(30));
             }
-            _ => panic!("expected WHERE clause"),
+            _ => panic!("expected WHERE Cmp Eq"),
+        }
+    }
+
+    #[test]
+    fn parse_select_where_gt() {
+        let stmt = parse("SELECT * FROM user WHERE age > 25").unwrap();
+        match stmt {
+            Statement::Select {
+                filter:
+                    Some(WhereClause::Cmp {
+                        field,
+                        op: CmpOp::Gt,
+                        value,
+                    }),
+                ..
+            } => {
+                assert_eq!(field, "age");
+                assert_eq!(value, Literal::Int(25));
+            }
+            _ => panic!("expected WHERE Cmp Gt"),
+        }
+    }
+
+    #[test]
+    fn parse_select_where_ne_string() {
+        let stmt = parse("SELECT * FROM user WHERE name != 'Bob'").unwrap();
+        match stmt {
+            Statement::Select {
+                filter:
+                    Some(WhereClause::Cmp {
+                        field,
+                        op: CmpOp::Ne,
+                        value,
+                    }),
+                ..
+            } => {
+                assert_eq!(field, "name");
+                assert_eq!(value, Literal::String("Bob".into()));
+            }
+            _ => panic!("expected WHERE Cmp Ne"),
+        }
+    }
+
+    #[test]
+    fn parse_select_where_and() {
+        let stmt = parse("SELECT * FROM user WHERE age >= 20 AND age <= 30").unwrap();
+        match stmt {
+            Statement::Select {
+                filter: Some(WhereClause::And(left, right)),
+                ..
+            } => {
+                assert!(matches!(*left, WhereClause::Cmp { op: CmpOp::Gte, .. }));
+                assert!(matches!(*right, WhereClause::Cmp { op: CmpOp::Lte, .. }));
+            }
+            _ => panic!("expected WHERE And"),
+        }
+    }
+
+    #[test]
+    fn parse_traversal_single_hop() {
+        let stmt = parse("SELECT ->knows->user FROM user:alice").unwrap();
+        match stmt {
+            Statement::Select {
+                fields: SelectFields::Traversal(chain),
+                from: FromTarget::Record(r),
+                ..
+            } => {
+                assert_eq!(chain.hops.len(), 1);
+                assert_eq!(chain.hops[0].direction, TraversalDirection::Out);
+                assert_eq!(chain.hops[0].edge_type, "knows");
+                assert_eq!(chain.hops[0].dest_table, "user");
+                assert_eq!(chain.projection, None);
+                assert_eq!(r.id, "alice");
+            }
+            _ => panic!("expected Traversal Select"),
+        }
+    }
+
+    #[test]
+    fn parse_traversal_with_projection() {
+        let stmt = parse("SELECT ->knows->user.name FROM user:alice").unwrap();
+        match stmt {
+            Statement::Select {
+                fields: SelectFields::Traversal(chain),
+                ..
+            } => {
+                assert_eq!(chain.projection, Some("name".into()));
+            }
+            _ => panic!("expected Traversal Select with projection"),
+        }
+    }
+
+    #[test]
+    fn parse_traversal_incoming() {
+        let stmt = parse("SELECT <-likes<-user FROM user:bob").unwrap();
+        match stmt {
+            Statement::Select {
+                fields: SelectFields::Traversal(chain),
+                ..
+            } => {
+                assert_eq!(chain.hops[0].direction, TraversalDirection::In);
+                assert_eq!(chain.hops[0].edge_type, "likes");
+                assert_eq!(chain.hops[0].dest_table, "user");
+            }
+            _ => panic!("expected incoming Traversal"),
+        }
+    }
+
+    #[test]
+    fn parse_traversal_two_hops() {
+        let stmt = parse("SELECT ->knows->user->likes->product.title FROM user:alice").unwrap();
+        match stmt {
+            Statement::Select {
+                fields: SelectFields::Traversal(chain),
+                ..
+            } => {
+                assert_eq!(chain.hops.len(), 2);
+                assert_eq!(chain.hops[0].edge_type, "knows");
+                assert_eq!(chain.hops[0].dest_table, "user");
+                assert_eq!(chain.hops[1].edge_type, "likes");
+                assert_eq!(chain.hops[1].dest_table, "product");
+                assert_eq!(chain.projection, Some("title".into()));
+            }
+            _ => panic!("expected two-hop Traversal"),
         }
     }
 

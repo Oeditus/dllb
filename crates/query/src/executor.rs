@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use dllb_core::{RecordId, Result, Value};
 use dllb_document::{Collection, Document};
-use dllb_graph::{Edge, EdgeStore};
+use dllb_graph::{Edge, EdgeStore, Traversal};
 use dllb_storage::db::DllbStorage;
 
 use crate::ast::*;
@@ -102,6 +102,11 @@ impl<'s> QueryExecutor<'s> {
         from: &FromTarget,
         filter: Option<&WhereClause>,
     ) -> Result<QueryResult> {
+        // Graph traversal has its own execution path.
+        if let SelectFields::Traversal(chain) = select_fields {
+            return self.exec_traversal_select(chain, from, filter);
+        }
+
         let (table, docs) = match from {
             FromTarget::Table(table) => {
                 let coll = Collection::new(self.storage, &self.ns, &self.db, table);
@@ -119,12 +124,10 @@ impl<'s> QueryExecutor<'s> {
 
         // Apply WHERE filter.
         let filtered: Vec<Document> = match filter {
-            Some(WhereClause::Eq { field, value }) => {
-                let target = value.to_value();
-                docs.into_iter()
-                    .filter(|d| d.get(field) == Some(&target))
-                    .collect()
-            }
+            Some(clause) => docs
+                .into_iter()
+                .filter(|d| matches_where(d, clause))
+                .collect(),
             None => docs,
         };
 
@@ -143,12 +146,97 @@ impl<'s> QueryExecutor<'s> {
                         }
                         m
                     }
+                    SelectFields::Traversal(_) => unreachable!(),
                 };
                 // Always include id.
                 row.insert("id".into(), Value::String(format!("{table}:{}", doc.id.id)));
                 row
             })
             .collect();
+
+        Ok(QueryResult::Rows(rows))
+    }
+
+    /// Execute a graph traversal SELECT.
+    ///
+    /// Follows each hop in the chain starting from the `from` source(s),
+    /// then fetches the final destination records and applies the WHERE filter.
+    fn exec_traversal_select(
+        &self,
+        chain: &crate::ast::TraversalChain,
+        from: &FromTarget,
+        filter: Option<&WhereClause>,
+    ) -> Result<QueryResult> {
+        use crate::ast::TraversalDirection;
+
+        // Collect starting vertex IDs.
+        let mut current_ids: Vec<String> = match from {
+            FromTarget::Record(r) => vec![r.id.clone()],
+            FromTarget::Table(t) => {
+                let coll = Collection::new(self.storage, &self.ns, &self.db, t);
+                coll.scan_all()?.into_iter().map(|d| d.id.id).collect()
+            }
+        };
+
+        // Follow each hop in sequence.
+        for hop in &chain.hops {
+            let es = EdgeStore::new(self.storage, &self.ns, &self.db, &hop.edge_type);
+            let tv = Traversal::new(&es);
+            let mut next_ids: Vec<String> = Vec::new();
+
+            for id in &current_ids {
+                let edges = match hop.direction {
+                    TraversalDirection::Out => tv.outgoing_typed(id, &hop.edge_type)?,
+                    TraversalDirection::In => tv.incoming_typed(id, &hop.edge_type)?,
+                };
+                for edge in edges {
+                    let dest = match hop.direction {
+                        TraversalDirection::Out => edge.dst,
+                        TraversalDirection::In => edge.src,
+                    };
+                    // Deduplicate destinations.
+                    if !next_ids.contains(&dest) {
+                        next_ids.push(dest);
+                    }
+                }
+            }
+            current_ids = next_ids;
+        }
+
+        // Resolve final destination records.
+        let final_table = match chain.hops.last() {
+            Some(h) => h.dest_table.as_str(),
+            None => return Ok(QueryResult::Rows(vec![])),
+        };
+        let coll = Collection::new(self.storage, &self.ns, &self.db, final_table);
+
+        let mut rows: Vec<BTreeMap<String, Value>> = Vec::new();
+        for id in &current_ids {
+            let Some(doc) = coll.get(id)? else {
+                continue;
+            };
+            // Apply WHERE filter on the destination document.
+            if let Some(clause) = filter {
+                if !matches_where(&doc, clause) {
+                    continue;
+                }
+            }
+            let mut row = match &chain.projection {
+                None => doc.fields.clone(),
+                Some(field) => {
+                    let mut m = BTreeMap::new();
+                    if let Some(v) = doc.fields.get(field) {
+                        m.insert(field.clone(), v.clone());
+                    }
+                    m
+                }
+            };
+            row.insert(
+                "id".into(),
+                Value::String(format!("{final_table}:{}", doc.id.id)),
+            );
+            rows.push(row);
+        }
 
         Ok(QueryResult::Rows(rows))
     }
@@ -175,5 +263,58 @@ impl<'s> QueryExecutor<'s> {
         store.relate(&edge)?;
 
         Ok(QueryResult::Ok)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WHERE evaluation helpers
+// ---------------------------------------------------------------------------
+
+/// Evaluate a [`WhereClause`] against a document.
+fn matches_where(doc: &Document, clause: &WhereClause) -> bool {
+    match clause {
+        WhereClause::Cmp { field, op, value } => {
+            let Some(doc_val) = doc.fields.get(field) else {
+                return false;
+            };
+            let target = value.to_value();
+            match op {
+                CmpOp::Eq => doc_val == &target,
+                CmpOp::Ne => doc_val != &target,
+                CmpOp::Gt => {
+                    matches!(
+                        cmp_values(doc_val, &target),
+                        Some(std::cmp::Ordering::Greater)
+                    )
+                }
+                CmpOp::Lt => {
+                    matches!(cmp_values(doc_val, &target), Some(std::cmp::Ordering::Less))
+                }
+                CmpOp::Gte => matches!(
+                    cmp_values(doc_val, &target),
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                ),
+                CmpOp::Lte => matches!(
+                    cmp_values(doc_val, &target),
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                ),
+            }
+        }
+        WhereClause::And(left, right) => matches_where(doc, left) && matches_where(doc, right),
+    }
+}
+
+/// Compare two [`Value`]s for ordering.
+///
+/// Returns `None` for incomparable type combinations (e.g. string vs int).
+/// Cross-type Int/Float comparison is supported.
+fn cmp_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
+        _ => None,
     }
 }
