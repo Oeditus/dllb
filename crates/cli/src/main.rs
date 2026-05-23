@@ -1,12 +1,33 @@
 //! dllb interactive REPL.
 //!
 //! Opens an embedded database and provides a line-editing shell for
-//! executing queries. Results are printed as formatted JSON.
+//! executing queries. Results are rendered with syntax highlighting
+//! via [`marcli`].
+
+mod render;
 
 use dllb_query::{QueryExecutor, format_error, format_result};
 use dllb_storage::db::DllbStorage;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+
+const HELP: &str = "\
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `.quit` / `.exit` | Exit the shell |
+| `.help` | Show this help |
+
+## Queries
+
+```sql
+CREATE table:id SET field = value, ...;
+SELECT */fields FROM table[:id] [WHERE field = value];
+DELETE table:id;
+RELATE src->edge->dst [SET field = value, ...];
+```
+";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -14,9 +35,19 @@ fn main() {
     let ns = get_arg(&args, "--ns").unwrap_or_else(|| "default".into());
     let db = get_arg(&args, "--db").unwrap_or_else(|| "default".into());
 
-    println!("dllb v{} -- interactive shell", env!("CARGO_PKG_VERSION"));
-    println!("Database: {db_path}  Namespace: {ns}  Database: {db}");
-    println!("Type a query, .help for commands, .quit to exit.\n");
+    let r = if has_flag(&args, "--no-color") {
+        render::Renderer::plain()
+    } else {
+        render::Renderer::colored()
+    };
+
+    let banner = format!(
+        "# dllb v{ver}\n\n\
+         `{db_path}` | namespace **{ns}** | database **{db}**\n\n\
+         Type a query, `.help` for commands, `.quit` to exit.",
+        ver = env!("CARGO_PKG_VERSION"),
+    );
+    println!("{}\n", r.md(&banner));
 
     let storage = DllbStorage::open(&db_path).expect("failed to open database");
     let executor = QueryExecutor::new(&storage, &ns, &db);
@@ -36,15 +67,7 @@ fn main() {
                 match trimmed {
                     ".quit" | ".exit" => break,
                     ".help" => {
-                        println!("Commands:");
-                        println!("  .quit / .exit  Exit the shell");
-                        println!("  .help          Show this help");
-                        println!();
-                        println!("Queries:");
-                        println!("  CREATE table:id SET field = value, ...;");
-                        println!("  SELECT */fields FROM table[:id] [WHERE field = value];");
-                        println!("  DELETE table:id;");
-                        println!("  RELATE src->edge->dst [SET field = value, ...];");
+                        println!("{}", r.md(HELP));
                         continue;
                     }
                     _ => {}
@@ -52,22 +75,26 @@ fn main() {
 
                 let query = trimmed.trim_end_matches(';').trim();
                 match executor.run(query) {
-                    Ok(result) => println!("{}", format_result(&result)),
-                    Err(err) => println!("{}", format_error(&err)),
+                    Ok(result) => println!("{}", r.json(&format_result(&result))),
+                    Err(err) => eprintln!("{}", r.error(&format_error(&err))),
                 }
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             Err(err) => {
-                eprintln!("Error: {err}");
+                eprintln!("{}", r.error(&format!(r#"{{"error":"{err}"}}"#)));
                 break;
             }
         }
     }
 
     rl.save_history(".dllb_history").ok();
-    println!("Bye.");
+    println!("{}", r.md("*Bye.*"));
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
