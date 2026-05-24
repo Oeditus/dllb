@@ -81,7 +81,7 @@ dllb-cli [OPTIONS]
 ### Example session
 
 ```
-dllb v0.1.0 -- interactive shell
+dllb v0.2.0 -- interactive shell
 Database: dllb.redb  Namespace: default  Database: default
 Type a query, .help for commands, .quit to exit.
 
