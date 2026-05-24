@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout dllb
+        uses: actions/checkout@v4
+        with:
+          path: Oeditus/dllb
+
+      - name: Checkout joerl
+        uses: actions/checkout@v4
+        with:
+          repository: am-kantox/joerl
+          path: Rust/joerl
+
+      - name: Checkout marcli
+        uses: actions/checkout@v4
+        with:
+          repository: Oeditus/marcli-rust
+          path: Rust/marcli
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        working-directory: Oeditus/dllb
+        run: cargo build --release --target ${{ matrix.target }} -p dllb-server -p dllb-cli
+
+      - name: Build (cross)
+        if: matrix.cross
+        working-directory: Oeditus/dllb
+        run: cross build --release --target ${{ matrix.target }} -p dllb-server -p dllb-cli
+
+      - name: Package
+        working-directory: Oeditus/dllb
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          archive="dllb-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/${archive}"
+          cp "target/${{ matrix.target }}/release/dllb-server" "dist/${archive}/" || true
+          cp "target/${{ matrix.target }}/release/dllb-cli"    "dist/${archive}/" || true
+          cp LICENSE README.md                                 "dist/${archive}/" 2>/dev/null || true
+          cd dist
+          tar czf "${archive}.tar.gz" "${archive}"
+          echo "ASSET=dist/${archive}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dllb-${{ matrix.target }}
+          path: Oeditus/dllb/${{ env.ASSET }}
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*.tar.gz

@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dllb
+        uses: actions/checkout@v4
+        with:
+          path: Oeditus/dllb
+
+      - name: Checkout joerl
+        uses: actions/checkout@v4
+        with:
+          repository: am-kantox/joerl
+          path: Rust/joerl
+
+      - name: Checkout marcli
+        uses: actions/checkout@v4
+        with:
+          repository: Oeditus/marcli-rust
+          path: Rust/marcli
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Oeditus/dllb -> target
+
+      - name: Format check
+        working-directory: Oeditus/dllb
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: Oeditus/dllb
+        run: cargo clippy --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout dllb
+        uses: actions/checkout@v4
+        with:
+          path: Oeditus/dllb
+
+      - name: Checkout joerl
+        uses: actions/checkout@v4
+        with:
+          repository: am-kantox/joerl
+          path: Rust/joerl
+
+      - name: Checkout marcli
+        uses: actions/checkout@v4
+        with:
+          repository: Oeditus/marcli-rust
+          path: Rust/marcli
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Oeditus/dllb -> target
+
+      - name: Run tests
+        working-directory: Oeditus/dllb
+        run: cargo test --workspace
