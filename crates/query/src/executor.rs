@@ -101,19 +101,23 @@ impl<'s> QueryExecutor<'s> {
         // ON CONFLICT UPDATE requires an explicit ID to be meaningful.
         if let Some(conflict) = on_conflict {
             let id_str = id.ok_or_else(|| {
-                dllb_core::Error::Query(
-                    "ON CONFLICT UPDATE requires an explicit record ID".into(),
-                )
+                dllb_core::Error::Query("ON CONFLICT UPDATE requires an explicit record ID".into())
             })?;
 
             let update_fields: std::collections::BTreeMap<String, Value> = match conflict {
                 crate::ast::OnConflict::Update => {
                     // Reuse the CREATE fields for the update.
-                    fields.iter().map(|(k, v)| (k.clone(), v.to_value())).collect()
+                    fields
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_value()))
+                        .collect()
                 }
                 crate::ast::OnConflict::UpdateSet(update_set) => {
                     // Use the explicit ON CONFLICT UPDATE SET fields.
-                    update_set.iter().map(|(k, v)| (k.clone(), v.to_value())).collect()
+                    update_set
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_value()))
+                        .collect()
                 }
             };
 
@@ -252,10 +256,10 @@ impl<'s> QueryExecutor<'s> {
                 continue;
             };
             // Apply WHERE filter on the destination document.
-            if let Some(clause) = filter {
-                if !matches_where(&doc, clause) {
-                    continue;
-                }
+            if let Some(clause) = filter
+                && !matches_where(&doc, clause)
+            {
+                continue;
             }
             let mut row = match &chain.projection {
                 None => doc.fields.clone(),

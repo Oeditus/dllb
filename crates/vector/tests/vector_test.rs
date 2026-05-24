@@ -64,7 +64,7 @@ fn brute_force_empty_search() {
 #[test]
 fn hnsw_empty_search() {
     let idx = HnswIndex::new(32, DistanceMetric::Cosine, HnswConfig::default());
-    let hits = idx.search(&vec![0.0; 32], 10);
+    let hits = idx.search(&[0.0; 32], 10);
     assert!(hits.is_empty());
 }
 

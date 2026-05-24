@@ -3,8 +3,6 @@
 //! Exercises documents, graph edges, full-text search, and vector KNN
 //! in a single test to prove all crates compose correctly.
 
-use std::collections::BTreeMap;
-
 use dllb_core::{RecordId, Value};
 use dllb_document::{Collection, Document};
 use dllb_graph::{Edge, EdgeStore, Traversal};

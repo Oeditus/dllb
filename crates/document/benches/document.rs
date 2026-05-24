@@ -14,10 +14,10 @@ use dllb_storage::db::DllbStorage;
 // ---------------------------------------------------------------------------
 
 fn make_doc(table: &str, i: usize) -> Document {
-    Document::new(RecordId::new(table, &format!("u{i:08}")))
+    Document::new(RecordId::new(table, format!("u{i:08}")))
         .with_field("name", Value::String(format!("User {i}")))
         .with_field("age", Value::Int(20 + (i % 60) as i64))
-        .with_field("active", Value::Bool(i % 2 == 0))
+        .with_field("active", Value::Bool(i.is_multiple_of(2)))
 }
 
 // ---------------------------------------------------------------------------

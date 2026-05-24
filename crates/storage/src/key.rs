@@ -408,10 +408,20 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn tag_sort_order() {
-        assert!(tag::METADATA < tag::DOCUMENT);
-        assert!(tag::DOCUMENT < tag::INDEX);
-        assert!(tag::INDEX < tag::GRAPH_EDGE);
+        assert!(
+            tag::METADATA < tag::DOCUMENT,
+            "METADATA should sort before DOCUMENT"
+        );
+        assert!(
+            tag::DOCUMENT < tag::INDEX,
+            "DOCUMENT should sort before INDEX"
+        );
+        assert!(
+            tag::INDEX < tag::GRAPH_EDGE,
+            "INDEX should sort before GRAPH_EDGE"
+        );
     }
 
     #[test]

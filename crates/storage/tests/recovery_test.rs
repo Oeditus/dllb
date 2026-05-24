@@ -2,7 +2,6 @@
 
 use dllb_storage::db::DllbStorage;
 use dllb_storage::key;
-use dllb_storage::kv::KvStore;
 
 #[test]
 fn data_persists_across_reopen() {

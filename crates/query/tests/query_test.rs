@@ -633,14 +633,14 @@ fn boolean_and_float_values() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    e.run("CREATE item:x SET active = true, score = 3.14;")
+    e.run("CREATE item:x SET active = true, score = 2.72;")
         .unwrap();
 
     let (result, _outcome) = e.run("SELECT * FROM item:x;").unwrap();
     match result {
         QueryResult::Rows(rows) => {
             assert_eq!(rows[0].get("active"), Some(&Value::Bool(true)));
-            assert_eq!(rows[0].get("score"), Some(&Value::Float(3.14)));
+            assert_eq!(rows[0].get("score"), Some(&Value::Float(2.72)));
         }
         _ => panic!("expected Rows"),
     }

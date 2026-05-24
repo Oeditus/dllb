@@ -44,14 +44,22 @@ impl Renderer {
 
     /// Render a fenced code block with the given language tag.
     pub fn code(&self, raw: &str, lang: &str) -> String {
-        let content = if lang == "json" { prettify_json(raw) } else { raw.to_string() };
+        let content = if lang == "json" {
+            prettify_json(raw)
+        } else {
+            raw.to_string()
+        };
         let block = format!("```{lang}\n{content}\n```");
         marcli::render(&block, self.opts())
     }
 
     /// Render an error (bold heading + highlighted code block).
     pub fn error(&self, raw: &str, lang: &str) -> String {
-        let content = if lang == "json" { prettify_json(raw) } else { raw.to_string() };
+        let content = if lang == "json" {
+            prettify_json(raw)
+        } else {
+            raw.to_string()
+        };
         let block = format!("**error**\n\n```{lang}\n{content}\n```");
         marcli::render(&block, self.opts())
     }

@@ -111,7 +111,7 @@ fn full_pipeline_metaast_to_documents_and_edges() {
     // Store the module container.
     let module_name = tree.get_meta_str("name").unwrap();
     coll.create(
-        Document::new(RecordId::new("ast_node", &format!("mod_{module_name}")))
+        Document::new(RecordId::new("ast_node", format!("mod_{module_name}")))
             .with_field("name", Value::String(module_name.into()))
             .with_field("kind", Value::String("container".into()))
             .with_field("language", Value::String("elixir".into())),

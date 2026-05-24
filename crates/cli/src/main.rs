@@ -80,19 +80,16 @@ fn main() {
                         println!("{}", r.code(&format_result(&result, outcome), lang));
                     }
                     Err(err) => {
-                        eprintln!("{}", r.error(
-                            &format_error(&err, OutcomeFormat::Json),
-                            "json",
-                        ));
+                        eprintln!(
+                            "{}",
+                            r.error(&format_error(&err, OutcomeFormat::Json), "json",)
+                        );
                     }
                 }
             }
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
             Err(err) => {
-                eprintln!("{}", r.error(
-                    &format!(r#"{{"error":"{err}"}}"#),
-                    "json",
-                ));
+                eprintln!("{}", r.error(&format!(r#"{{"error":"{err}"}}"#), "json",));
                 break;
             }
         }

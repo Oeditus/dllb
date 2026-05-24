@@ -411,7 +411,7 @@ fn parse_outcome(tokens: &[Token], pos: &mut usize) -> Result<OutcomeFormat> {
                 other => {
                     return Err(Error::Query(format!(
                         "unknown outcome format '{other}', expected JSON, TOON, or CSV"
-                    )))
+                    )));
                 }
             };
             *pos += 1;

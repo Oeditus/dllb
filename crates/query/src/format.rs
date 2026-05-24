@@ -104,14 +104,17 @@ fn toon_value(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => format!("{f}"),
-        Value::String(s) => format!("\"{}\"" , s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Bytes(b) => format!("\"<{} bytes>\"", b.len()),
         Value::Array(arr) => {
             let items: Vec<String> = arr.iter().map(toon_value).collect();
             format!("[{}]", items.join(", "))
         }
         Value::Object(map) => {
-            let pairs: Vec<String> = map.iter().map(|(k, v)| format!("{k} = {}", toon_value(v))).collect();
+            let pairs: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{k} = {}", toon_value(v)))
+                .collect();
             format!("{{ {} }}", pairs.join(", "))
         }
         Value::RecordId(rid) => format!("\"{rid}\""),
@@ -200,7 +203,7 @@ fn csv_value(v: &Value) -> String {
 /// Quote a CSV field if it contains commas, quotes, or newlines.
 fn csv_escape(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"" , s.replace('"', "\"\""))
+        format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
     }
