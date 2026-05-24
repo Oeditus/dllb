@@ -56,7 +56,14 @@ fn parse_create(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Set)?;
     let fields = parse_set_clause(tokens, pos)?;
 
-    Ok(Statement::Create { table, id, fields })
+    let on_conflict = parse_on_conflict(tokens, pos)?;
+
+    Ok(Statement::Create {
+        table,
+        id,
+        fields,
+        on_conflict,
+    })
 }
 
 // -----------------------------------------------------------------------
@@ -212,6 +219,28 @@ fn parse_relate(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         dst,
         fields,
     })
+}
+
+// -----------------------------------------------------------------------
+// ON CONFLICT UPDATE [SET field = value, ...]
+// -----------------------------------------------------------------------
+
+fn parse_on_conflict(tokens: &[Token], pos: &mut usize) -> Result<Option<OnConflict>> {
+    if !matches!(tokens.get(*pos), Some(Token::On)) {
+        return Ok(None);
+    }
+    *pos += 1;
+    expect(tokens, pos, &Token::Conflict)?;
+    expect(tokens, pos, &Token::Update)?;
+
+    // Optional SET clause with explicit update fields.
+    if matches!(tokens.get(*pos), Some(Token::Set)) {
+        *pos += 1;
+        let fields = parse_set_clause(tokens, pos)?;
+        Ok(Some(OnConflict::UpdateSet(fields)))
+    } else {
+        Ok(Some(OnConflict::Update))
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -409,12 +438,59 @@ mod tests {
     #[test]
     fn parse_create_with_id() {
         match stmt("CREATE user:alice SET name = 'Alice', age = 30;") {
-            Statement::Create { table, id, fields } => {
+            Statement::Create {
+                table,
+                id,
+                fields,
+                on_conflict,
+            } => {
                 assert_eq!(table, "user");
                 assert_eq!(id, Some("alice".into()));
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0], ("name".into(), Literal::String("Alice".into())));
                 assert_eq!(fields[1], ("age".into(), Literal::Int(30)));
+                assert_eq!(on_conflict, None);
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn parse_create_on_conflict_update() {
+        match stmt("CREATE user:alice SET name = 'Alice' ON CONFLICT UPDATE;") {
+            Statement::Create {
+                table,
+                id,
+                fields,
+                on_conflict,
+            } => {
+                assert_eq!(table, "user");
+                assert_eq!(id, Some("alice".into()));
+                assert_eq!(fields.len(), 1);
+                assert_eq!(on_conflict, Some(OnConflict::Update));
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn parse_create_on_conflict_update_set() {
+        match stmt(
+            "CREATE user:alice SET name = 'Alice', age = 30 ON CONFLICT UPDATE SET age = 31;",
+        ) {
+            Statement::Create {
+                on_conflict,
+                fields,
+                ..
+            } => {
+                assert_eq!(fields.len(), 2);
+                match on_conflict {
+                    Some(OnConflict::UpdateSet(update_fields)) => {
+                        assert_eq!(update_fields.len(), 1);
+                        assert_eq!(update_fields[0], ("age".into(), Literal::Int(31)));
+                    }
+                    _ => panic!("expected OnConflict::UpdateSet"),
+                }
             }
             _ => panic!("expected Create"),
         }

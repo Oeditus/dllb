@@ -407,6 +407,139 @@ fn select_traversal_empty_result() {
 }
 
 // -------------------------------------------------------------------
+// ON CONFLICT UPDATE
+// -------------------------------------------------------------------
+
+#[test]
+fn on_conflict_update_creates_when_no_conflict() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let (result, _) = e
+        .run("CREATE user:alice SET name = 'Alice', age = 30 ON CONFLICT UPDATE;")
+        .unwrap();
+    match result {
+        QueryResult::Created { id } => {
+            assert_eq!(id.table, "user");
+            assert_eq!(id.id, "alice");
+        }
+        _ => panic!("expected Created"),
+    }
+
+    // Verify the document was stored.
+    let (result, _) = e.run("SELECT * FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(30)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn on_conflict_update_merges_on_conflict() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // First create.
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+
+    // Second create with ON CONFLICT UPDATE -- should merge.
+    let (result, _) = e
+        .run("CREATE user:alice SET name = 'Alice Updated', age = 31 ON CONFLICT UPDATE;")
+        .unwrap();
+    match result {
+        QueryResult::Updated { id } => {
+            assert_eq!(id.table, "user");
+            assert_eq!(id.id, "alice");
+        }
+        _ => panic!("expected Updated, got {result:?}"),
+    }
+
+    // Verify the fields were merged.
+    let (result, _) = e.run("SELECT * FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("name"),
+                Some(&Value::String("Alice Updated".into()))
+            );
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(31)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn on_conflict_update_set_applies_explicit_fields() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // First create with name and age.
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+
+    // ON CONFLICT UPDATE SET -- only update age, ignore the name in the CREATE SET.
+    let (result, _) = e
+        .run("CREATE user:alice SET name = 'Ignored', age = 99 ON CONFLICT UPDATE SET age = 31;")
+        .unwrap();
+    assert!(matches!(result, QueryResult::Updated { .. }));
+
+    let (result, _) = e.run("SELECT * FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            // name should remain 'Alice' (from the original), not 'Ignored'.
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            // age should be 31 (from ON CONFLICT UPDATE SET).
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(31)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn on_conflict_update_preserves_existing_fields() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Create with three fields.
+    e.run("CREATE user:alice SET name = 'Alice', age = 30, active = true;")
+        .unwrap();
+
+    // ON CONFLICT UPDATE with only age -- name and active should be preserved.
+    let (result, _) = e
+        .run("CREATE user:alice SET age = 31 ON CONFLICT UPDATE;")
+        .unwrap();
+    assert!(matches!(result, QueryResult::Updated { .. }));
+
+    let (result, _) = e.run("SELECT * FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(31)));
+            assert_eq!(rows[0].get("active"), Some(&Value::Bool(true)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn on_conflict_update_without_id_errors() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // ON CONFLICT UPDATE without explicit ID should error.
+    let result = e.run("CREATE user SET name = 'Alice' ON CONFLICT UPDATE;");
+    assert!(result.is_err());
+}
+
+// -------------------------------------------------------------------
 // Parse errors
 // -------------------------------------------------------------------
 

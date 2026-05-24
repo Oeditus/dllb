@@ -42,6 +42,9 @@ fn format_result_json(result: &QueryResult) -> String {
         QueryResult::Created { id } => {
             format!(r#"{{"status":"created","id":"{}"}}"#, id)
         }
+        QueryResult::Updated { id } => {
+            format!(r#"{{"status":"updated","id":"{}"}}"#, id)
+        }
         QueryResult::Deleted { existed } => {
             format!(r#"{{"status":"deleted","existed":{existed}}}"#)
         }
@@ -69,6 +72,9 @@ fn format_result_toon(result: &QueryResult) -> String {
         QueryResult::Ok => "status = \"ok\"".to_string(),
         QueryResult::Created { id } => {
             format!("status = \"created\"\nid = \"{id}\"")
+        }
+        QueryResult::Updated { id } => {
+            format!("status = \"updated\"\nid = \"{id}\"")
         }
         QueryResult::Deleted { existed } => {
             format!("status = \"deleted\"\nexisted = {existed}")
@@ -125,6 +131,9 @@ fn format_result_csv(result: &QueryResult) -> String {
         QueryResult::Ok => "status\nok".to_string(),
         QueryResult::Created { id } => {
             format!("status,id\ncreated,{}", csv_escape(&id.to_string()))
+        }
+        QueryResult::Updated { id } => {
+            format!("status,id\nupdated,{}", csv_escape(&id.to_string()))
         }
         QueryResult::Deleted { existed } => {
             format!("status,existed\ndeleted,{existed}")

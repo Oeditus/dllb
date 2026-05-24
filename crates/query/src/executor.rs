@@ -16,6 +16,8 @@ pub enum QueryResult {
     Ok,
     /// A record was created.
     Created { id: RecordId },
+    /// An existing record was updated (e.g. via `ON CONFLICT UPDATE`).
+    Updated { id: RecordId },
     /// A record was deleted.
     Deleted { existed: bool },
     /// Rows returned from a SELECT.
@@ -42,9 +44,12 @@ impl<'s> QueryExecutor<'s> {
     /// Execute a parsed statement.
     pub fn execute(&self, stmt: &Statement) -> Result<QueryResult> {
         match stmt {
-            Statement::Create { table, id, fields } => {
-                self.exec_create(table, id.as_deref(), fields)
-            }
+            Statement::Create {
+                table,
+                id,
+                fields,
+                on_conflict,
+            } => self.exec_create(table, id.as_deref(), fields, on_conflict.as_ref()),
             Statement::Select {
                 fields,
                 from,
@@ -79,6 +84,7 @@ impl<'s> QueryExecutor<'s> {
         table: &str,
         id: Option<&str>,
         fields: &[(String, Literal)],
+        on_conflict: Option<&crate::ast::OnConflict>,
     ) -> Result<QueryResult> {
         let coll = Collection::new(self.storage, &self.ns, &self.db, table);
 
@@ -92,12 +98,38 @@ impl<'s> QueryExecutor<'s> {
             doc.set(name, lit.to_value());
         }
 
-        let created_id = match id {
-            Some(id) => coll.create_with_id(id, doc)?,
-            None => coll.create(doc)?,
-        };
+        // ON CONFLICT UPDATE requires an explicit ID to be meaningful.
+        if let Some(conflict) = on_conflict {
+            let id_str = id.ok_or_else(|| {
+                dllb_core::Error::Query(
+                    "ON CONFLICT UPDATE requires an explicit record ID".into(),
+                )
+            })?;
 
-        Ok(QueryResult::Created { id: created_id })
+            let update_fields: std::collections::BTreeMap<String, Value> = match conflict {
+                crate::ast::OnConflict::Update => {
+                    // Reuse the CREATE fields for the update.
+                    fields.iter().map(|(k, v)| (k.clone(), v.to_value())).collect()
+                }
+                crate::ast::OnConflict::UpdateSet(update_set) => {
+                    // Use the explicit ON CONFLICT UPDATE SET fields.
+                    update_set.iter().map(|(k, v)| (k.clone(), v.to_value())).collect()
+                }
+            };
+
+            let (result_id, was_created) = coll.upsert(id_str, doc, update_fields)?;
+            if was_created {
+                Ok(QueryResult::Created { id: result_id })
+            } else {
+                Ok(QueryResult::Updated { id: result_id })
+            }
+        } else {
+            let created_id = match id {
+                Some(id) => coll.create_with_id(id, doc)?,
+                None => coll.create(doc)?,
+            };
+            Ok(QueryResult::Created { id: created_id })
+        }
     }
 
     fn exec_select(

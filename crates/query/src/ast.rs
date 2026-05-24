@@ -19,14 +19,25 @@ pub struct Query {
     pub outcome: OutcomeFormat,
 }
 
+/// Behaviour when a `CREATE` hits an existing record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnConflict {
+    /// `ON CONFLICT UPDATE` -- merge the CREATE fields into the existing record.
+    Update,
+    /// `ON CONFLICT UPDATE SET field = value, ...` -- apply explicit fields to
+    /// the existing record instead of the CREATE fields.
+    UpdateSet(Vec<(String, Literal)>),
+}
+
 /// A parsed query statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    /// `CREATE table SET field = value, ...;`
+    /// `CREATE table SET field = value, ... [ON CONFLICT UPDATE [SET ...]];`
     Create {
         table: String,
         id: Option<String>,
         fields: Vec<(String, Literal)>,
+        on_conflict: Option<OnConflict>,
     },
     /// `SELECT fields FROM target [WHERE clause];`
     Select {

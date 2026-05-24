@@ -155,6 +155,34 @@ impl<'s> Collection<'s> {
     }
 
     // -------------------------------------------------------------------
+    // Upsert (ON CONFLICT UPDATE)
+    // -------------------------------------------------------------------
+
+    /// Create a document or merge fields into it if it already exists.
+    ///
+    /// Returns `(record_id, was_created)` where `was_created` is `true` if the
+    /// document was newly inserted, and `false` if an existing document was
+    /// updated.
+    pub fn upsert(
+        &self,
+        id: &str,
+        doc: Document,
+        update_fields: BTreeMap<String, Value>,
+    ) -> Result<(RecordId, bool)> {
+        let doc_key = key::document_key(&self.ns, &self.db, &self.table, id);
+
+        if self.storage.contains(&doc_key)? {
+            // Record exists -- merge the update fields.
+            self.merge(id, update_fields)?;
+            Ok((RecordId::new(&self.table, id), false))
+        } else {
+            // No conflict -- create normally.
+            let created_id = self.create_inner(id, doc)?;
+            Ok((created_id, true))
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Update
     // -------------------------------------------------------------------
 
