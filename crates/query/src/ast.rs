@@ -1,7 +1,7 @@
 //! Abstract Syntax Tree types for the dllb query language.
 
 /// Requested output format for a query result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OutcomeFormat {
     /// JSON (the default wire format).
     #[default]
@@ -29,6 +29,16 @@ pub enum OnConflict {
     UpdateSet(Vec<(String, Literal)>),
 }
 
+/// Community detection algorithm named in a `GRAPH COMMUNITIES` statement.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CommunityAlgorithm {
+    /// Louvain modularity optimisation (default).
+    #[default]
+    Louvain,
+    /// Label propagation.
+    LabelPropagation,
+}
+
 /// A parsed query statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -54,6 +64,14 @@ pub enum Statement {
         edge_type: String,
         dst: RecordRef,
         fields: Vec<(String, Literal)>,
+    },
+    /// `GRAPH COMMUNITIES <table> [ALGORITHM louvain|lp] [MAX_ITER n] [RESOLUTION f]`
+    GraphCommunities {
+        /// Edge table (edge type) to compute communities over.
+        table: String,
+        algorithm: CommunityAlgorithm,
+        max_iterations: usize,
+        resolution: f64,
     },
 }
 

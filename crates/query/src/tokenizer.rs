@@ -21,6 +21,8 @@ pub enum Token {
     Update,
     Limit,
     Outcome,
+    Graph,
+    Communities,
     // Literals
     Ident(String),
     StringLit(String),
@@ -224,6 +226,8 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 "UPDATE" => Token::Update,
                 "LIMIT" => Token::Limit,
                 "OUTCOME" => Token::Outcome,
+                "GRAPH" => Token::Graph,
+                "COMMUNITIES" => Token::Communities,
                 "TRUE" => Token::True,
                 "FALSE" => Token::False,
                 "NONE" | "NULL" => Token::None,

@@ -1,8 +1,10 @@
 //! Integration tests for the query engine.
 
+use std::sync::Arc;
+
 use dllb_core::Value;
 use dllb_graph::{EdgeStore, Traversal};
-use dllb_query::{QueryExecutor, QueryResult};
+use dllb_query::{ComputeCache, QueryExecutor, QueryResult, WriteVersions};
 use dllb_storage::db::DllbStorage;
 
 fn temp_storage() -> (tempfile::TempDir, DllbStorage) {
@@ -14,6 +16,15 @@ fn temp_storage() -> (tempfile::TempDir, DllbStorage) {
 
 fn exec(storage: &DllbStorage) -> QueryExecutor<'_> {
     QueryExecutor::new(storage, "ns", "db")
+}
+
+/// Build an executor that shares real caches — for testing cache behaviour.
+fn exec_with_shared_cache<'s>(
+    storage: &'s DllbStorage,
+    cache: Arc<ComputeCache>,
+    versions: Arc<WriteVersions>,
+) -> QueryExecutor<'s> {
+    QueryExecutor::new_with_cache(storage, "ns", "db", cache, versions)
 }
 
 // -------------------------------------------------------------------
@@ -692,6 +703,141 @@ fn large_document_many_fields() {
         }
         _ => panic!("expected Rows"),
     }
+}
+
+// -------------------------------------------------------------------
+// Compute cache
+// -------------------------------------------------------------------
+
+/// Two-cluster directed graph suitable for community detection.
+fn build_two_cluster_graph(storage: &DllbStorage) {
+    let e = exec(storage);
+    // Dense cluster A
+    for (a, b) in [("a1", "a2"), ("a2", "a3"), ("a3", "a1")] {
+        e.run(&format!("RELATE fn:{a}->calls->fn:{b}")).unwrap();
+    }
+    // Dense cluster B
+    for (a, b) in [("b1", "b2"), ("b2", "b3"), ("b3", "b1")] {
+        e.run(&format!("RELATE fn:{a}->calls->fn:{b}")).unwrap();
+    }
+    // Weak bridge
+    e.run("RELATE fn:a1->calls->fn:b1").unwrap();
+}
+
+#[test]
+fn communities_first_call_returns_communities_result() {
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let e = exec(&storage);
+    let (result, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    match result {
+        QueryResult::Communities { algorithm, groups } => {
+            assert_eq!(algorithm, "louvain");
+            // 6 nodes → at most 6 communities, at least 2.
+            assert!(groups.len() >= 2 && groups.len() <= 6);
+        }
+        _ => panic!("expected Communities on first call"),
+    }
+}
+
+#[test]
+fn communities_second_call_is_cache_hit() {
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
+
+    // Seed the write version so version == 0 after building edges above
+    // (edges were written without the shared version map, so we manually bump).
+    // Actually: the RELATE calls in build_two_cluster_graph used a plain
+    // exec() with its own private versions, so the shared `versions` still
+    // sits at 0.  The shared executor will compute and cache at version=0.
+    // A subsequent call with the same shared executor must return CachedResponse.
+
+    let e1 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (first, _) = e1.run("GRAPH COMMUNITIES calls").unwrap();
+    assert!(
+        matches!(first, QueryResult::Communities { .. }),
+        "first call should compute and return Communities"
+    );
+
+    // Second call with same shared cache must be a hit.
+    let e2 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (second, _) = e2.run("GRAPH COMMUNITIES calls").unwrap();
+    assert!(
+        matches!(second, QueryResult::CachedResponse(_)),
+        "second call should be served from cache"
+    );
+}
+
+#[test]
+fn relate_invalidates_communities_cache() {
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
+
+    // First GRAPH COMMUNITIES — populates cache at version=0.
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (first, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    assert!(matches!(first, QueryResult::Communities { .. }));
+
+    // Second GRAPH COMMUNITIES — should be a cache hit (version still 0).
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (hit, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    assert!(
+        matches!(hit, QueryResult::CachedResponse(_)),
+        "should be cached before any new RELATE"
+    );
+
+    // Add a new edge — this bumps the version via the shared WriteVersions.
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    e.run("RELATE fn:a2->calls->fn:b2").unwrap();
+
+    // Third GRAPH COMMUNITIES — cache is stale (version=1), must recompute.
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (after_write, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    assert!(
+        matches!(after_write, QueryResult::Communities { .. }),
+        "cache should be invalidated after RELATE"
+    );
+}
+
+#[test]
+fn communities_cache_result_is_consistent_with_fresh_compute() {
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
+
+    // First call — compute.
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (first, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    let first_json = match first {
+        QueryResult::Communities { ref algorithm, ref groups } => {
+            format!("{}:{}", algorithm, groups.len())
+        }
+        _ => panic!("expected Communities"),
+    };
+
+    // Second call — cache hit, returns pre-serialised JSON string.
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (second, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
+    let cached_payload = match second {
+        QueryResult::CachedResponse(s) => s,
+        _ => panic!("expected CachedResponse"),
+    };
+
+    // The cached JSON must contain the same community count as the first result.
+    let community_count_str = first_json.split(':').nth(1).unwrap();
+    assert!(
+        cached_payload.contains(&format!("\"community_count\":{community_count_str}")),
+        "cached JSON should embed the same community count as the computed result"
+    );
 }
 
 #[test]

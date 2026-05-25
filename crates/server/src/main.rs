@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-use dllb_query::{QueryExecutor, format_error, format_result};
+use dllb_query::{ComputeCache, QueryExecutor, WriteVersions, format_error, format_result};
 use dllb_storage::db::DllbStorage;
 
 #[tokio::main]
@@ -21,6 +21,13 @@ async fn main() {
     let db = std::env::var("DLLB_DB").unwrap_or_else(|_| "default".into());
 
     let storage = Arc::new(DllbStorage::open(&db_path).expect("failed to open database"));
+
+    // Process-wide compute cache and write-version map shared across all
+    // connection handlers. A cache entry built by one connection is served to
+    // all subsequent connections; a RELATE on any connection immediately
+    // invalidates the relevant analytics entries.
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -40,6 +47,8 @@ async fn main() {
         tracing::info!("connection from {addr}");
 
         let storage = Arc::clone(&storage);
+        let cache = Arc::clone(&cache);
+        let versions = Arc::clone(&versions);
         let ns = ns.clone();
         let db = db.clone();
 
@@ -53,7 +62,13 @@ async fn main() {
                     continue;
                 }
 
-                let executor = QueryExecutor::new(&storage, &ns, &db);
+                let executor = QueryExecutor::new_with_cache(
+                    &storage,
+                    &ns,
+                    &db,
+                    Arc::clone(&cache),
+                    Arc::clone(&versions),
+                );
                 let response = match executor.run(query) {
                     Ok((result, outcome)) => format_result(&result, outcome),
                     Err(err) => format_error(&err, dllb_query::OutcomeFormat::Json),

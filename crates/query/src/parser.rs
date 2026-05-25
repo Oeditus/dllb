@@ -32,6 +32,7 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         Some(Token::Select) => parse_select(tokens, pos),
         Some(Token::Delete) => parse_delete(tokens, pos),
         Some(Token::Relate) => parse_relate(tokens, pos),
+        Some(Token::Graph) => parse_graph(tokens, pos),
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
     }
@@ -219,6 +220,103 @@ fn parse_delete(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Colon)?;
     let id = expect_ident(tokens, pos)?;
     Ok(Statement::Delete { table, id })
+}
+
+// -----------------------------------------------------------------------
+// GRAPH COMMUNITIES <table> [ALGORITHM louvain|lp] [MAX_ITER n] [RESOLUTION f]
+// -----------------------------------------------------------------------
+
+fn parse_graph(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect(tokens, pos, &Token::Graph)?;
+    match tokens.get(*pos) {
+        Some(Token::Communities) => parse_graph_communities(tokens, pos),
+        Some(t) => Err(Error::Query(format!(
+            "expected COMMUNITIES after GRAPH, got {t:?}"
+        ))),
+        None => Err(Error::Query(
+            "unexpected end of input after GRAPH".into(),
+        )),
+    }
+}
+
+fn parse_graph_communities(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect(tokens, pos, &Token::Communities)?;
+    let table = expect_ident(tokens, pos)?;
+
+    let mut algorithm = crate::ast::CommunityAlgorithm::default();
+    let mut max_iterations: usize = 10;
+    let mut resolution: f64 = 1.0;
+
+    // Parse optional keyword clauses: ALGORITHM <name> | MAX_ITER <n> | RESOLUTION <f>
+    loop {
+        match tokens.get(*pos) {
+            Some(Token::Ident(kw)) if kw.to_uppercase() == "ALGORITHM" => {
+                *pos += 1;
+                let name = expect_ident(tokens, pos)?;
+                algorithm = match name.to_uppercase().as_str() {
+                    "LOUVAIN" => crate::ast::CommunityAlgorithm::Louvain,
+                    "LP" | "LABELPROPAGATION" | "LABEL_PROPAGATION" => {
+                        crate::ast::CommunityAlgorithm::LabelPropagation
+                    }
+                    other => {
+                        return Err(Error::Query(format!(
+                            "unknown community algorithm '{other}'; expected louvain or lp"
+                        )));
+                    }
+                };
+            }
+            Some(Token::Ident(kw)) if kw.to_uppercase() == "MAX_ITER" => {
+                *pos += 1;
+                match tokens.get(*pos) {
+                    Some(Token::IntLit(n)) if *n > 0 => {
+                        max_iterations = *n as usize;
+                        *pos += 1;
+                    }
+                    Some(t) => {
+                        return Err(Error::Query(format!(
+                            "MAX_ITER requires a positive integer, got {t:?}"
+                        )));
+                    }
+                    None => {
+                        return Err(Error::Query(
+                            "unexpected end of input after MAX_ITER".into(),
+                        ));
+                    }
+                }
+            }
+            Some(Token::Ident(kw)) if kw.to_uppercase() == "RESOLUTION" => {
+                *pos += 1;
+                match tokens.get(*pos) {
+                    Some(Token::FloatLit(f)) => {
+                        resolution = *f;
+                        *pos += 1;
+                    }
+                    Some(Token::IntLit(n)) => {
+                        resolution = *n as f64;
+                        *pos += 1;
+                    }
+                    Some(t) => {
+                        return Err(Error::Query(format!(
+                            "RESOLUTION requires a numeric value, got {t:?}"
+                        )));
+                    }
+                    None => {
+                        return Err(Error::Query(
+                            "unexpected end of input after RESOLUTION".into(),
+                        ));
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Ok(Statement::GraphCommunities {
+        table,
+        algorithm,
+        max_iterations,
+        resolution,
+    })
 }
 
 // -----------------------------------------------------------------------
@@ -805,5 +903,98 @@ mod tests {
     #[test]
     fn parse_outcome_unknown_format() {
         assert!(parse("SELECT * FROM user OUTCOME XML").is_err());
+    }
+
+    // -- GRAPH COMMUNITIES tests ---------------------------------------------
+
+    #[test]
+    fn parse_graph_communities_defaults() {
+        match stmt("GRAPH COMMUNITIES calls") {
+            Statement::GraphCommunities {
+                table,
+                algorithm,
+                max_iterations,
+                resolution,
+            } => {
+                assert_eq!(table, "calls");
+                assert_eq!(algorithm, CommunityAlgorithm::Louvain);
+                assert_eq!(max_iterations, 10);
+                assert!((resolution - 1.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_algorithm_lp() {
+        match stmt("GRAPH COMMUNITIES calls ALGORITHM lp") {
+            Statement::GraphCommunities { algorithm, .. } => {
+                assert_eq!(algorithm, CommunityAlgorithm::LabelPropagation);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_algorithm_louvain_explicit() {
+        match stmt("GRAPH COMMUNITIES calls ALGORITHM louvain") {
+            Statement::GraphCommunities { algorithm, .. } => {
+                assert_eq!(algorithm, CommunityAlgorithm::Louvain);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_max_iter() {
+        match stmt("GRAPH COMMUNITIES calls MAX_ITER 20") {
+            Statement::GraphCommunities { max_iterations, .. } => {
+                assert_eq!(max_iterations, 20);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_resolution_float() {
+        match stmt("GRAPH COMMUNITIES calls RESOLUTION 0.5") {
+            Statement::GraphCommunities { resolution, .. } => {
+                assert!((resolution - 0.5).abs() < f64::EPSILON);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_all_options() {
+        match stmt("GRAPH COMMUNITIES calls ALGORITHM lp MAX_ITER 5 RESOLUTION 2") {
+            Statement::GraphCommunities {
+                table,
+                algorithm,
+                max_iterations,
+                resolution,
+            } => {
+                assert_eq!(table, "calls");
+                assert_eq!(algorithm, CommunityAlgorithm::LabelPropagation);
+                assert_eq!(max_iterations, 5);
+                assert!((resolution - 2.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("expected GraphCommunities"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_communities_with_semicolon() {
+        assert!(parse("GRAPH COMMUNITIES calls;").is_ok());
+    }
+
+    #[test]
+    fn parse_graph_communities_unknown_algorithm_errors() {
+        assert!(parse("GRAPH COMMUNITIES calls ALGORITHM spectral").is_err());
+    }
+
+    #[test]
+    fn parse_graph_missing_communities_errors() {
+        assert!(parse("GRAPH calls").is_err());
     }
 }

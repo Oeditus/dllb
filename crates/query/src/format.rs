@@ -38,6 +38,7 @@ pub fn format_error(err: &dllb_core::Error, outcome: OutcomeFormat) -> String {
 
 fn format_result_json(result: &QueryResult) -> String {
     match result {
+        QueryResult::CachedResponse(s) => s.clone(),
         QueryResult::Ok => r#"{"status":"ok"}"#.to_string(),
         QueryResult::Created { id } => {
             format!(r#"{{"status":"created","id":"{}"}}"#, id)
@@ -55,6 +56,13 @@ fn format_result_json(result: &QueryResult) -> String {
                 rows.len()
             )
         }
+        QueryResult::Communities { algorithm, groups } => {
+            let json_groups = serde_json::to_string(groups).unwrap_or_else(|_| "[]".into());
+            format!(
+                r#"{{"status":"communities","algorithm":"{algorithm}","community_count":{},"data":{json_groups}}}"#,
+                groups.len()
+            )
+        }
     }
 }
 
@@ -69,6 +77,7 @@ fn format_error_json(err: &dllb_core::Error) -> String {
 
 fn format_result_toon(result: &QueryResult) -> String {
     match result {
+        QueryResult::CachedResponse(s) => s.clone(),
         QueryResult::Ok => "status = \"ok\"".to_string(),
         QueryResult::Created { id } => {
             format!("status = \"created\"\nid = \"{id}\"")
@@ -82,6 +91,19 @@ fn format_result_toon(result: &QueryResult) -> String {
         QueryResult::Rows(rows) => {
             let mut out = format!("status = \"rows\"\ncount = {}", rows.len());
             for row in rows {
+                out.push_str("\n\n[[data]]");
+                for (k, v) in row {
+                    out.push_str(&format!("\n{k} = {}", toon_value(v)));
+                }
+            }
+            out
+        }
+        QueryResult::Communities { algorithm, groups } => {
+            let mut out = format!(
+                "status = \"communities\"\nalgorithm = \"{algorithm}\"\ncommunity_count = {}",
+                groups.len()
+            );
+            for row in groups {
                 out.push_str("\n\n[[data]]");
                 for (k, v) in row {
                     out.push_str(&format!("\n{k} = {}", toon_value(v)));
@@ -131,6 +153,7 @@ fn toon_value(v: &Value) -> String {
 
 fn format_result_csv(result: &QueryResult) -> String {
     match result {
+        QueryResult::CachedResponse(s) => s.clone(),
         QueryResult::Ok => "status\nok".to_string(),
         QueryResult::Created { id } => {
             format!("status,id\ncreated,{}", csv_escape(&id.to_string()))
@@ -142,6 +165,7 @@ fn format_result_csv(result: &QueryResult) -> String {
             format!("status,existed\ndeleted,{existed}")
         }
         QueryResult::Rows(rows) => format_rows_csv(rows),
+        QueryResult::Communities { groups, .. } => format_rows_csv(groups),
     }
 }
 

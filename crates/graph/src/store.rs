@@ -86,6 +86,52 @@ impl<'s> EdgeStore<'s> {
         Ok(existed)
     }
 
+    /// Scan all outgoing edges in this edge table.
+    ///
+    /// Returns `(src, dst, weight)` triples. Weight is taken from the
+    /// `"weight"` edge property (float or int); defaults to `1.0` when
+    /// absent. Incoming reverse-pointer entries are skipped automatically.
+    pub fn scan_all_outgoing(&self) -> dllb_core::Result<Vec<(String, String, f64)>> {
+        use dllb_storage::key::{self, tag};
+        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
+        let entries = self.storage.prefix_scan(&prefix)?;
+        let mut edges = Vec::with_capacity(entries.len() / 2);
+
+        for (k, v) in entries {
+            let parts = key::parse_key(&k)?;
+            // remainder = src\0<dir>edge_type\0dst
+            let segs: Vec<&[u8]> = parts.remainder.splitn(3, |&b| b == key::SEPARATOR).collect();
+            if segs.len() < 3 {
+                continue;
+            }
+            let dir_type = segs[1];
+            if dir_type.is_empty() || dir_type[0] != key::dir::OUTGOING {
+                continue; // skip incoming reverse pointers
+            }
+            let src = match std::str::from_utf8(segs[0]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            let dst = match std::str::from_utf8(segs[2]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            let weight = if v.is_empty() {
+                1.0
+            } else {
+                let props: BTreeMap<String, dllb_core::Value> =
+                    rmp_serde::from_slice(&v).unwrap_or_default();
+                match props.get("weight") {
+                    Some(dllb_core::Value::Float(f)) => *f,
+                    Some(dllb_core::Value::Int(n)) => *n as f64,
+                    _ => 1.0,
+                }
+            };
+            edges.push((src, dst, weight));
+        }
+        Ok(edges)
+    }
+
     /// Replace the properties of an existing edge.
     pub fn update_properties(
         &self,

@@ -1,13 +1,16 @@
 //! Query executor: maps parsed [`Statement`]s to concrete crate API calls.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
 use dllb_document::{Collection, Document};
-use dllb_graph::{Edge, EdgeStore, Traversal};
+use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal};
+use dllb_graph::{community::Algorithm, detect_communities_weighted};
 use dllb_storage::db::DllbStorage;
 
 use crate::ast::*;
+use crate::cache::{CacheKind, CacheKey, ComputeCache, WriteVersions};
 
 /// Result of executing a query.
 #[derive(Debug)]
@@ -22,6 +25,16 @@ pub enum QueryResult {
     Deleted { existed: bool },
     /// Rows returned from a SELECT.
     Rows(Vec<BTreeMap<String, Value>>),
+    /// Communities returned from a `GRAPH COMMUNITIES` statement.
+    Communities {
+        algorithm: String,
+        groups: Vec<BTreeMap<String, Value>>,
+    },
+    /// A pre-formatted response served from the compute cache.
+    ///
+    /// The payload is already serialised in the `OutcomeFormat` that was
+    /// requested and is returned as-is by all `format_result_*` functions.
+    CachedResponse(String),
 }
 
 /// Executes parsed statements against the storage layer.
@@ -29,15 +42,47 @@ pub struct QueryExecutor<'s> {
     storage: &'s DllbStorage,
     ns: String,
     db: String,
+    /// Shared compute-result cache. Each call to `run` consults this before
+    /// executing and stores the result after a cache miss.
+    cache: Arc<ComputeCache>,
+    /// Per-table write-version counters used for cache invalidation.
+    versions: Arc<WriteVersions>,
 }
 
 impl<'s> QueryExecutor<'s> {
-    /// Create a new executor scoped to a namespace and database.
+    /// Create a new executor with a private (non-shared) cache.
+    ///
+    /// Suitable for tests and one-off uses where cross-request caching is
+    /// not needed. For the production server, prefer [`Self::new_with_cache`].
     pub fn new(storage: &'s DllbStorage, ns: &str, db: &str) -> Self {
         Self {
             storage,
             ns: ns.into(),
             db: db.into(),
+            cache: Arc::new(ComputeCache::default()),
+            versions: Arc::new(WriteVersions::default()),
+        }
+    }
+
+    /// Create an executor that shares a process-wide cache and version map.
+    ///
+    /// All connection handlers should share the same `Arc<ComputeCache>` and
+    /// `Arc<WriteVersions>` so that a cache entry built by one connection is
+    /// served to all subsequent connections, and a write on one connection
+    /// invalidates the cache for every connection.
+    pub fn new_with_cache(
+        storage: &'s DllbStorage,
+        ns: &str,
+        db: &str,
+        cache: Arc<ComputeCache>,
+        versions: Arc<WriteVersions>,
+    ) -> Self {
+        Self {
+            storage,
+            ns: ns.into(),
+            db: db.into(),
+            cache,
+            versions,
         }
     }
 
@@ -63,6 +108,12 @@ impl<'s> QueryExecutor<'s> {
                 dst,
                 fields,
             } => self.exec_relate(src, edge_type, dst, fields),
+            Statement::GraphCommunities {
+                table,
+                algorithm,
+                max_iterations,
+                resolution,
+            } => self.exec_graph_communities(table, algorithm, *max_iterations, *resolution),
         }
     }
 
@@ -70,10 +121,90 @@ impl<'s> QueryExecutor<'s> {
     ///
     /// Returns the result together with the `OutcomeFormat` requested by
     /// the `OUTCOME` clause (defaults to JSON when omitted).
+    ///
+    /// For cacheable statements (`GRAPH COMMUNITIES`) this checks the
+    /// [`ComputeCache`] before executing. On a miss it computes, formats,
+    /// and stores the result. On a hit it returns a
+    /// [`QueryResult::CachedResponse`] that bypasses serialisation.
     pub fn run(&self, query: &str) -> Result<(QueryResult, crate::ast::OutcomeFormat)> {
         let q = crate::parser::parse(query)?;
+
+        // -- Cache read-through -----------------------------------------------
+        if let Some(payload) = self.try_cache_hit(&q.statement, q.outcome) {
+            return Ok((QueryResult::CachedResponse(payload), q.outcome));
+        }
+
         let result = self.execute(&q.statement)?;
+
+        // -- Post-execute: bump version or populate cache --------------------
+        self.post_execute(&q.statement, &result, q.outcome);
+
         Ok((result, q.outcome))
+    }
+
+    // -------------------------------------------------------------------
+    // Cache helpers
+    // -------------------------------------------------------------------
+
+    /// Check the cache for a pre-computed result. Returns the formatted
+    /// payload string on a hit, or `None` on a miss or for non-cacheable
+    /// statements.
+    fn try_cache_hit(&self, stmt: &Statement, outcome: OutcomeFormat) -> Option<String> {
+        match stmt {
+            Statement::GraphCommunities {
+                table,
+                algorithm,
+                max_iterations,
+                resolution,
+            } => {
+                let kind = CacheKind::communities(
+                    algo_str(algorithm),
+                    *max_iterations,
+                    *resolution,
+                );
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                self.cache.get(&key, version)
+            }
+            _ => None,
+        }
+    }
+
+    /// Post-execution side effects:
+    /// - `RELATE` bumps the write version for the edge table.
+    /// - `GRAPH COMMUNITIES` stores the formatted result in the cache.
+    fn post_execute(&self, stmt: &Statement, result: &QueryResult, outcome: OutcomeFormat) {
+        match (stmt, result) {
+            // Bump write version whenever an edge is successfully written.
+            (Statement::Relate { edge_type, .. }, QueryResult::Ok) => {
+                self.versions.bump(&self.ns, &self.db, edge_type);
+            }
+
+            // Populate cache after a successful communities computation.
+            (
+                Statement::GraphCommunities {
+                    table,
+                    algorithm,
+                    max_iterations,
+                    resolution,
+                },
+                QueryResult::Communities { .. },
+            ) => {
+                let kind = CacheKind::communities(
+                    algo_str(algorithm),
+                    *max_iterations,
+                    *resolution,
+                );
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                // Read version *after* computation so the cached entry
+                // reflects the write state at time of result, not before.
+                let version = self.versions.current(&self.ns, &self.db, table);
+                let payload = crate::format::format_result(result, outcome);
+                self.cache.insert(key, payload, version);
+            }
+
+            _ => {}
+        }
     }
 
     // -------------------------------------------------------------------
@@ -295,6 +426,71 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Rows(rows))
     }
 
+    fn exec_graph_communities(
+        &self,
+        table: &str,
+        algorithm: &crate::ast::CommunityAlgorithm,
+        max_iterations: usize,
+        resolution: f64,
+    ) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_outgoing()?;
+
+        let algo = match algorithm {
+            crate::ast::CommunityAlgorithm::Louvain => Algorithm::Louvain,
+            crate::ast::CommunityAlgorithm::LabelPropagation => Algorithm::LabelPropagation,
+        };
+
+        let opts = CommunityOptions {
+            algorithm: algo,
+            max_iterations,
+            resolution,
+            ..CommunityOptions::default()
+        };
+
+        let result = detect_communities_weighted(&edges, &opts);
+
+        // Serialise into rows: one row per community.
+        let mut groups: Vec<BTreeMap<String, Value>> = result
+            .groups
+            .into_iter()
+            .map(|(comm_id, members)| {
+                let size = members.len() as i64;
+                let members_val =
+                    Value::Array(members.into_iter().map(Value::String).collect());
+                let mut row = BTreeMap::new();
+                row.insert("id".into(), Value::String(comm_id));
+                row.insert("size".into(), Value::Int(size));
+                row.insert("members".into(), members_val);
+                row
+            })
+            .collect();
+
+        // Sort by descending size for a consistent, useful output order.
+        groups.sort_by(|a, b| {
+            let sa = match a.get("size") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            let sb = match b.get("size") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            sb.cmp(&sa)
+        });
+
+        let algo_name = match algorithm {
+            crate::ast::CommunityAlgorithm::Louvain => "louvain",
+            crate::ast::CommunityAlgorithm::LabelPropagation => "lp",
+        }
+        .to_string();
+
+        Ok(QueryResult::Communities {
+            algorithm: algo_name,
+            groups,
+        })
+    }
+
     fn exec_delete(&self, table: &str, id: &str) -> Result<QueryResult> {
         let coll = Collection::new(self.storage, &self.ns, &self.db, table);
         let existed = coll.delete(id)?;
@@ -317,6 +513,19 @@ impl<'s> QueryExecutor<'s> {
         store.relate(&edge)?;
 
         Ok(QueryResult::Ok)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+/// Map a `CommunityAlgorithm` to the string used in cache keys.
+#[inline]
+fn algo_str(algo: &crate::ast::CommunityAlgorithm) -> &'static str {
+    match algo {
+        crate::ast::CommunityAlgorithm::Louvain => "louvain",
+        crate::ast::CommunityAlgorithm::LabelPropagation => "lp",
     }
 }
 
