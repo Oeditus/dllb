@@ -19,6 +19,7 @@ pub enum Token {
     On,
     Conflict,
     Update,
+    Limit,
     Outcome,
     // Literals
     Ident(String),
@@ -221,6 +222,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 "ON" => Token::On,
                 "CONFLICT" => Token::Conflict,
                 "UPDATE" => Token::Update,
+                "LIMIT" => Token::Limit,
                 "OUTCOME" => Token::Outcome,
                 "TRUE" => Token::True,
                 "FALSE" => Token::False,
@@ -267,6 +269,23 @@ mod tests {
                 Token::Star,
                 Token::From,
                 Token::Ident("user".into()),
+                Token::Semicolon,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_select_limit() {
+        let tokens = tokenize("SELECT * FROM user LIMIT 10;").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Select,
+                Token::Star,
+                Token::From,
+                Token::Ident("user".into()),
+                Token::Limit,
+                Token::IntLit(10),
                 Token::Semicolon,
             ]
         );

@@ -451,7 +451,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "dllb-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dllb-core",
  "dllb-query",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-code-intel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dllb-core",
  "dllb-document",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "half",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-document"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dllb-core",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dllb-core",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dllb-core",
  "dllb-document",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dllb-core",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dllb-core",
  "dllb-query",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-transaction"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "crossbeam",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "dllb-vector"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dllb-core",
@@ -1105,7 +1105,7 @@ checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 
 [[package]]
 name = "marcli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "comrak",
  "once_cell",

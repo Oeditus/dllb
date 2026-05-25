@@ -82,6 +82,47 @@ fn select_named_fields() {
     }
 }
 
+#[test]
+fn select_limit_caps_rows() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET name = 'A';").unwrap();
+    e.run("CREATE user:b SET name = 'B';").unwrap();
+    e.run("CREATE user:c SET name = 'C';").unwrap();
+
+    let (result, _outcome) = e.run("SELECT * FROM user LIMIT 2;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_where_limit_caps_filtered_rows() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30;").unwrap();
+    e.run("CREATE user:b SET age = 30;").unwrap();
+    e.run("CREATE user:c SET age = 30;").unwrap();
+    e.run("CREATE user:d SET age = 20;").unwrap();
+
+    let (result, _outcome) = e.run("SELECT * FROM user WHERE age = 30 LIMIT 2;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|row| row.get("age") == Some(&Value::Int(30)))
+            );
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
 // -------------------------------------------------------------------
 // SELECT point lookup (table:id)
 // -------------------------------------------------------------------
@@ -386,6 +427,31 @@ fn select_traversal_with_where_on_dest() {
         QueryResult::Rows(rows) => {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get("name"), Some(&Value::String("Carol".into())));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn select_traversal_limit_caps_rows() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    e.run("CREATE user:bob SET name = 'Bob';").unwrap();
+    e.run("CREATE user:carol SET name = 'Carol';").unwrap();
+    e.run("CREATE user:dave SET name = 'Dave';").unwrap();
+
+    e.run("RELATE user:alice->knows->user:bob;").unwrap();
+    e.run("RELATE user:alice->knows->user:carol;").unwrap();
+    e.run("RELATE user:alice->knows->user:dave;").unwrap();
+
+    let (result, _outcome) = e
+        .run("SELECT ->knows->user FROM user:alice LIMIT 2;")
+        .unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
         }
         _ => panic!("expected Rows"),
     }

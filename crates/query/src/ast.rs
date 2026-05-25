@@ -39,11 +39,12 @@ pub enum Statement {
         fields: Vec<(String, Literal)>,
         on_conflict: Option<OnConflict>,
     },
-    /// `SELECT fields FROM target [WHERE clause];`
+    /// `SELECT fields FROM target [WHERE clause] [LIMIT n];`
     Select {
         fields: SelectFields,
         from: FromTarget,
         filter: Option<WhereClause>,
+        limit: Option<u64>,
     },
     /// `DELETE table:id;`
     Delete { table: String, id: String },

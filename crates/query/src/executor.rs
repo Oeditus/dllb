@@ -54,7 +54,8 @@ impl<'s> QueryExecutor<'s> {
                 fields,
                 from,
                 filter,
-            } => self.exec_select(fields, from, filter.as_ref()),
+                limit,
+            } => self.exec_select(fields, from, filter.as_ref(), *limit),
             Statement::Delete { table, id } => self.exec_delete(table, id),
             Statement::Relate {
                 src,
@@ -141,10 +142,11 @@ impl<'s> QueryExecutor<'s> {
         select_fields: &SelectFields,
         from: &FromTarget,
         filter: Option<&WhereClause>,
+        limit: Option<u64>,
     ) -> Result<QueryResult> {
         // Graph traversal has its own execution path.
         if let SelectFields::Traversal(chain) = select_fields {
-            return self.exec_traversal_select(chain, from, filter);
+            return self.exec_traversal_select(chain, from, filter, limit);
         }
 
         let (table, docs) = match from {
@@ -171,8 +173,14 @@ impl<'s> QueryExecutor<'s> {
             None => docs,
         };
 
+        // Apply LIMIT.
+        let limited: Vec<Document> = match limit {
+            Some(n) => filtered.into_iter().take(n as usize).collect(),
+            None => filtered,
+        };
+
         // Project fields.
-        let rows: Vec<BTreeMap<String, Value>> = filtered
+        let rows: Vec<BTreeMap<String, Value>> = limited
             .into_iter()
             .map(|doc| {
                 let mut row = match select_fields {
@@ -206,6 +214,7 @@ impl<'s> QueryExecutor<'s> {
         chain: &crate::ast::TraversalChain,
         from: &FromTarget,
         filter: Option<&WhereClause>,
+        limit: Option<u64>,
     ) -> Result<QueryResult> {
         use crate::ast::TraversalDirection;
 
@@ -276,6 +285,11 @@ impl<'s> QueryExecutor<'s> {
                 Value::String(format!("{final_table}:{}", doc.id.id)),
             );
             rows.push(row);
+        }
+
+        // Apply LIMIT.
+        if let Some(n) = limit {
+            rows.truncate(n as usize);
         }
 
         Ok(QueryResult::Rows(rows))

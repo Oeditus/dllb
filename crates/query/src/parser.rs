@@ -103,12 +103,39 @@ fn parse_select(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     };
 
     let filter = parse_where_clause(tokens, pos)?;
+    let limit = parse_limit(tokens, pos)?;
 
     Ok(Statement::Select {
         fields,
         from,
         filter,
+        limit,
     })
+}
+
+// -----------------------------------------------------------------------
+// LIMIT n
+// -----------------------------------------------------------------------
+
+fn parse_limit(tokens: &[Token], pos: &mut usize) -> Result<Option<u64>> {
+    if !matches!(tokens.get(*pos), Some(Token::Limit)) {
+        return Ok(None);
+    }
+    *pos += 1;
+    match tokens.get(*pos) {
+        Some(Token::IntLit(n)) if *n > 0 => {
+            let v = *n as u64;
+            *pos += 1;
+            Ok(Some(v))
+        }
+        Some(Token::IntLit(n)) => Err(Error::Query(format!(
+            "LIMIT must be a positive integer, got {n}"
+        ))),
+        Some(t) => Err(Error::Query(format!(
+            "expected positive integer after LIMIT, got {t:?}"
+        ))),
+        None => Err(Error::Query("unexpected end of input after LIMIT".into())),
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -502,7 +529,61 @@ mod tests {
             fields: SelectFields::All,
             from: FromTarget::Table(t),
             filter: None,
+            limit: None,
         } if t == "user"));
+    }
+
+    #[test]
+    fn parse_select_limit() {
+        match stmt("SELECT * FROM user LIMIT 10") {
+            Statement::Select {
+                fields: SelectFields::All,
+                from: FromTarget::Table(table),
+                filter: None,
+                limit: Some(10),
+            } => {
+                assert_eq!(table, "user");
+            }
+            _ => panic!("expected Select with LIMIT"),
+        }
+    }
+
+    #[test]
+    fn parse_select_where_limit() {
+        match stmt("SELECT name FROM user WHERE age > 25 LIMIT 3") {
+            Statement::Select {
+                fields: SelectFields::Named(names),
+                filter: Some(WhereClause::Cmp { field, op, value }),
+                limit: Some(3),
+                ..
+            } => {
+                assert_eq!(names, vec!["name"]);
+                assert_eq!(field, "age");
+                assert_eq!(op, CmpOp::Gt);
+                assert_eq!(value, Literal::Int(25));
+            }
+            _ => panic!("expected Select with WHERE and LIMIT"),
+        }
+    }
+
+    #[test]
+    fn parse_select_limit_before_outcome() {
+        let q = parse("SELECT * FROM user LIMIT 2 OUTCOME CSV").unwrap();
+        assert_eq!(q.outcome, OutcomeFormat::Csv);
+        match q.statement {
+            Statement::Select { limit, .. } => assert_eq!(limit, Some(2)),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_select_limit_rejects_zero() {
+        assert!(parse("SELECT * FROM user LIMIT 0").is_err());
+    }
+
+    #[test]
+    fn parse_select_limit_rejects_negative() {
+        assert!(parse("SELECT * FROM user LIMIT -1").is_err());
     }
 
     #[test]
