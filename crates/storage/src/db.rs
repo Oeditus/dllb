@@ -65,6 +65,12 @@ impl DllbStorage {
         self.backend.delete_batch(keys)
     }
 
+    /// Atomically insert multiple key-value pairs and delete multiple keys
+    /// in a single write transaction.
+    pub fn write_batch(&self, puts: &[(&[u8], &[u8])], deletes: &[&[u8]]) -> Result<()> {
+        self.backend.write_batch(puts, deletes)
+    }
+
     // ---------------------------------------------------------------
     // Read operations (direct, no actor)
     // ---------------------------------------------------------------

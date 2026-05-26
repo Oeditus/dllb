@@ -840,6 +840,129 @@ fn communities_cache_result_is_consistent_with_fresh_compute() {
     );
 }
 
+// -------------------------------------------------------------------
+// BEGIN BATCH / END BATCH (execute_batch)
+// -------------------------------------------------------------------
+
+#[test]
+fn batch_creates_single_transaction() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let stmts: Vec<dllb_query::ast::Statement> = [
+        "CREATE user:alice SET name = 'Alice', age = 30",
+        "CREATE user:bob SET name = 'Bob', age = 25",
+        "CREATE user:carol SET name = 'Carol', age = 35",
+    ]
+    .into_iter()
+    .map(|q| dllb_query::parse(q).unwrap().statement)
+    .collect();
+
+    let result = e.execute_batch(&stmts).unwrap();
+    match result {
+        QueryResult::Batch {
+            count: 3,
+            created: 3,
+            updated: 0,
+        } => {}
+        other => panic!("expected Batch{{count:3,created:3}}, got {other:?}"),
+    }
+
+    // Verify all three records exist.
+    let (rows_result, _) = e.run("SELECT * FROM user").unwrap();
+    match rows_result {
+        QueryResult::Rows(rows) => assert_eq!(rows.len(), 3),
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn batch_upsert_updates_existing() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Pre-create a record.
+    e.run("CREATE user:alice SET name = 'Alice', age = 30")
+        .unwrap();
+
+    // Batch with upsert: alice already exists, bob is new.
+    let stmts: Vec<dllb_query::ast::Statement> = [
+        "CREATE user:alice SET name = 'Alice Updated', age = 31 ON CONFLICT UPDATE",
+        "CREATE user:bob SET name = 'Bob', age = 25 ON CONFLICT UPDATE",
+    ]
+    .into_iter()
+    .map(|q| dllb_query::parse(q).unwrap().statement)
+    .collect();
+
+    let result = e.execute_batch(&stmts).unwrap();
+    match result {
+        QueryResult::Batch {
+            count: 2,
+            created: 1,
+            updated: 1,
+        } => {}
+        other => panic!("expected Batch{{count:2,created:1,updated:1}}, got {other:?}"),
+    }
+
+    // Verify alice was updated.
+    let (result, _) = e.run("SELECT * FROM user:alice").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(31)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn batch_creates_and_relates() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let stmts: Vec<dllb_query::ast::Statement> = [
+        "CREATE fn:parse SET name = 'parse'",
+        "CREATE fn:run SET name = 'run'",
+        "RELATE fn:parse->calls->fn:run SET callee = 'run'",
+    ]
+    .into_iter()
+    .map(|q| dllb_query::parse(q).unwrap().statement)
+    .collect();
+
+    let result = e.execute_batch(&stmts).unwrap();
+    match result {
+        QueryResult::Batch {
+            count: 3,
+            created: 2,
+            ..
+        } => {}
+        other => panic!("expected Batch with 2 created, got {other:?}"),
+    }
+
+    // Verify the edge exists via traversal.
+    let es = EdgeStore::new(&storage, "ns", "db", "calls");
+    let tv = Traversal::new(&es);
+    let outgoing = tv.outgoing_typed("parse", "calls").unwrap();
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].dst, "run");
+}
+
+#[test]
+fn batch_rejects_select() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let stmts: Vec<dllb_query::ast::Statement> = [
+        "CREATE user:alice SET name = 'Alice'",
+        "SELECT * FROM user",
+    ]
+    .into_iter()
+    .map(|q| dllb_query::parse(q).unwrap().statement)
+    .collect();
+
+    let err = e.execute_batch(&stmts);
+    assert!(err.is_err(), "batch should reject SELECT");
+}
+
 #[test]
 fn boolean_and_float_values() {
     let (_dir, storage) = temp_storage();

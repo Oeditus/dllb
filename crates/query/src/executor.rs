@@ -35,6 +35,12 @@ pub enum QueryResult {
     /// The payload is already serialised in the `OutcomeFormat` that was
     /// requested and is returned as-is by all `format_result_*` functions.
     CachedResponse(String),
+    /// Result of a `BEGIN BATCH ... END BATCH` block.
+    Batch {
+        count: usize,
+        created: usize,
+        updated: usize,
+    },
 }
 
 /// Executes parsed statements against the storage layer.
@@ -488,6 +494,125 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Communities {
             algorithm: algo_name,
             groups,
+        })
+    }
+
+    // -------------------------------------------------------------------
+    // Batch execution
+    // -------------------------------------------------------------------
+
+    /// Execute multiple statements in a single storage transaction.
+    ///
+    /// All KV operations are collected first, then applied in one atomic
+    /// `write_batch` call. This eliminates the per-statement write-commit
+    /// overhead that dominates bulk ingestion workloads.
+    ///
+    /// Only `CREATE` (with optional `ON CONFLICT UPDATE`) and `RELATE`
+    /// statements are supported inside a batch. SELECT, DELETE, and
+    /// GRAPH COMMUNITIES are rejected.
+    pub fn execute_batch(&self, stmts: &[Statement]) -> Result<QueryResult> {
+        let mut all_puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(stmts.len() * 2);
+        let mut all_deletes: Vec<Vec<u8>> = Vec::new();
+        let mut created: usize = 0;
+        let mut updated: usize = 0;
+
+        for stmt in stmts {
+            match stmt {
+                Statement::Create {
+                    table,
+                    id,
+                    fields,
+                    on_conflict,
+                } => {
+                    let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+                    let mut doc = Document::new(RecordId::generate(table));
+                    for (name, lit) in fields {
+                        doc.set(name, lit.to_value());
+                    }
+
+                    if let Some(conflict) = on_conflict {
+                        let id_str = id.as_deref().ok_or_else(|| {
+                            dllb_core::Error::Query(
+                                "ON CONFLICT UPDATE requires an explicit record ID".into(),
+                            )
+                        })?;
+
+                        let update_fields: std::collections::BTreeMap<String, Value> =
+                            match conflict {
+                                crate::ast::OnConflict::Update => fields
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), v.to_value()))
+                                    .collect(),
+                                crate::ast::OnConflict::UpdateSet(update_set) => update_set
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), v.to_value()))
+                                    .collect(),
+                            };
+
+                        let (_rid, was_created, puts, deletes) =
+                            coll.upsert_to_ops(id_str, doc, update_fields)?;
+                        all_puts.extend(puts);
+                        all_deletes.extend(deletes);
+                        if was_created {
+                            created += 1;
+                        } else {
+                            updated += 1;
+                        }
+                    } else {
+                        let id_str = match id {
+                            Some(s) => s.clone(),
+                            None => doc.id.id.clone(),
+                        };
+                        let (_rid, puts) = coll.create_to_ops(&id_str, doc)?;
+                        all_puts.extend(puts);
+                        created += 1;
+                    }
+                }
+                Statement::Relate {
+                    src,
+                    edge_type,
+                    dst,
+                    fields,
+                } => {
+                    let store =
+                        EdgeStore::new(self.storage, &self.ns, &self.db, edge_type);
+                    let mut edge = Edge::new(&src.id, edge_type, &dst.id);
+                    for (name, lit) in fields {
+                        edge = edge.with_property(name, lit.to_value());
+                    }
+                    let puts = store.relate_to_ops(&edge)?;
+                    all_puts.extend(puts);
+                }
+                _ => {
+                    return Err(dllb_core::Error::Query(
+                        "only CREATE and RELATE statements are supported inside BEGIN BATCH"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
+        // Single atomic write.
+        let put_refs: Vec<(&[u8], &[u8])> = all_puts
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+        let del_refs: Vec<&[u8]> = all_deletes.iter().map(|k| k.as_slice()).collect();
+        self.storage.write_batch(&put_refs, &del_refs)?;
+
+        let count = stmts.len();
+
+        // Bump write versions for any edge types touched.
+        for stmt in stmts {
+            if let Statement::Relate { edge_type, .. } = stmt {
+                self.versions.bump(&self.ns, &self.db, edge_type);
+            }
+        }
+
+        Ok(QueryResult::Batch {
+            count,
+            created,
+            updated,
         })
     }
 

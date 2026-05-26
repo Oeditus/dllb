@@ -113,6 +113,21 @@ impl KvStore for RedbBackend {
         txn.commit().map_err(map_err)?;
         Ok(())
     }
+
+    fn write_batch(&self, puts: &[(&[u8], &[u8])], deletes: &[&[u8]]) -> Result<()> {
+        let txn = self.db.begin_write().map_err(map_err)?;
+        {
+            let mut table = txn.open_table(DATA).map_err(map_err)?;
+            for &key in deletes {
+                table.remove(key).map_err(map_err)?;
+            }
+            for &(key, value) in puts {
+                table.insert(key, value).map_err(map_err)?;
+            }
+        }
+        txn.commit().map_err(map_err)?;
+        Ok(())
+    }
 }
 
 /// Map any redb error into `dllb_core::Error::Storage`.

@@ -56,6 +56,31 @@ impl<'s> EdgeStore<'s> {
             .put_batch(&[(&out_key, &props), (&in_key, &[])])
     }
 
+    /// Like [`relate`](Self::relate), but returns the KV operations without
+    /// writing to storage.
+    ///
+    /// Returns the two put operations (outgoing + incoming keys).
+    pub fn relate_to_ops(&self, edge: &Edge) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let props = serialize_props(&edge.properties)?;
+        let out_key = key::graph_outgoing_key(
+            &self.ns,
+            &self.db,
+            &self.table,
+            &edge.src,
+            &edge.edge_type,
+            &edge.dst,
+        );
+        let in_key = key::graph_incoming_key(
+            &self.ns,
+            &self.db,
+            &self.table,
+            &edge.dst,
+            &edge.edge_type,
+            &edge.src,
+        );
+        Ok(vec![(out_key, props), (in_key, vec![])])
+    }
+
     /// Get an edge by its (src, edge_type, dst) triple.
     pub fn get(&self, src: &str, edge_type: &str, dst: &str) -> Result<Option<Edge>> {
         let out_key = key::graph_outgoing_key(&self.ns, &self.db, &self.table, src, edge_type, dst);

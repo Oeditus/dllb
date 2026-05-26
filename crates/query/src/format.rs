@@ -49,6 +49,15 @@ fn format_result_json(result: &QueryResult) -> String {
         QueryResult::Deleted { existed } => {
             format!(r#"{{"status":"deleted","existed":{existed}}}"#)
         }
+        QueryResult::Batch {
+            count,
+            created,
+            updated,
+        } => {
+            format!(
+                r#"{{"status":"batch","count":{count},"created":{created},"updated":{updated}}}"#
+            )
+        }
         QueryResult::Rows(rows) => {
             let json_rows = serde_json::to_string(rows).unwrap_or_else(|_| "[]".into());
             format!(
@@ -87,6 +96,13 @@ fn format_result_toon(result: &QueryResult) -> String {
         }
         QueryResult::Deleted { existed } => {
             format!("status = \"deleted\"\nexisted = {existed}")
+        }
+        QueryResult::Batch {
+            count,
+            created,
+            updated,
+        } => {
+            format!("status = \"batch\"\ncount = {count}\ncreated = {created}\nupdated = {updated}")
         }
         QueryResult::Rows(rows) => {
             let mut out = format!("status = \"rows\"\ncount = {}", rows.len());
@@ -163,6 +179,13 @@ fn format_result_csv(result: &QueryResult) -> String {
         }
         QueryResult::Deleted { existed } => {
             format!("status,existed\ndeleted,{existed}")
+        }
+        QueryResult::Batch {
+            count,
+            created,
+            updated,
+        } => {
+            format!("status,count,created,updated\nbatch,{count},{created},{updated}")
         }
         QueryResult::Rows(rows) => format_rows_csv(rows),
         QueryResult::Communities { groups, .. } => format_rows_csv(groups),

@@ -115,6 +115,99 @@ impl<'s> Collection<'s> {
         Ok(doc.id)
     }
 
+    /// Like [`create_with_id`](Self::create_with_id), but returns the KV
+    /// operations without writing to storage.
+    ///
+    /// Returns `(record_id, put_ops)`. The caller is responsible for
+    /// executing the puts (typically via `storage.put_batch`).
+    pub fn create_to_ops(
+        &self,
+        id: &str,
+        mut doc: Document,
+    ) -> Result<(RecordId, Vec<(Vec<u8>, Vec<u8>)>)> {
+        doc.id = RecordId::new(&self.table, id);
+
+        if let Some(schema) = &self.schema {
+            validate_document(&doc, schema)?;
+        }
+
+        let doc_key = key::document_key(&self.ns, &self.db, &self.table, id);
+        let doc_bytes = serialize(&doc)?;
+
+        let idx_entries =
+            index::build_index_entries(&doc, &self.ns, &self.db, &self.table, &self.indexes)?;
+
+        let mut ops: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1 + idx_entries.len());
+        ops.push((doc_key, doc_bytes));
+        for (k, v) in idx_entries {
+            ops.push((k, v));
+        }
+
+        Ok((doc.id, ops))
+    }
+
+    /// Like [`upsert`](Self::upsert), but returns the KV operations without
+    /// writing to storage.
+    ///
+    /// Returns `(record_id, was_created, put_ops, delete_ops)`. The caller
+    /// must execute deletes before puts for correct index maintenance.
+    pub fn upsert_to_ops(
+        &self,
+        id: &str,
+        doc: Document,
+        update_fields: BTreeMap<String, Value>,
+    ) -> Result<(RecordId, bool, Vec<(Vec<u8>, Vec<u8>)>, Vec<Vec<u8>>)> {
+        let doc_key = key::document_key(&self.ns, &self.db, &self.table, id);
+
+        if self.storage.contains(&doc_key)? {
+            // Record exists -- compute merge ops.
+            let old = self
+                .get(id)?
+                .ok_or_else(|| Error::NotFound(format!("record not found: {id}")))?;
+
+            let mut merged = old.fields.clone();
+            for (k, v) in update_fields {
+                merged.insert(k, v);
+            }
+
+            let new_doc = Document {
+                id: old.id.clone(),
+                fields: merged,
+            };
+
+            if let Some(schema) = &self.schema {
+                validate_document(&new_doc, schema)?;
+            }
+
+            let new_bytes = serialize(&new_doc)?;
+
+            let old_idx =
+                index::build_index_entries(&old, &self.ns, &self.db, &self.table, &self.indexes)?;
+            let new_idx = index::build_index_entries(
+                &new_doc,
+                &self.ns,
+                &self.db,
+                &self.table,
+                &self.indexes,
+            )?;
+
+            let delete_ops: Vec<Vec<u8>> = old_idx.into_iter().map(|(k, _)| k).collect();
+
+            let mut put_ops: Vec<(Vec<u8>, Vec<u8>)> =
+                Vec::with_capacity(1 + new_idx.len());
+            put_ops.push((doc_key, new_bytes));
+            for (k, v) in new_idx {
+                put_ops.push((k, v));
+            }
+
+            Ok((RecordId::new(&self.table, id), false, put_ops, delete_ops))
+        } else {
+            // No conflict -- compute create ops.
+            let (record_id, put_ops) = self.create_to_ops(id, doc)?;
+            Ok((record_id, true, put_ops, vec![]))
+        }
+    }
+
     // -------------------------------------------------------------------
     // Read
     // -------------------------------------------------------------------

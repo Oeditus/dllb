@@ -62,6 +62,63 @@ async fn main() {
                     continue;
                 }
 
+                // --- BEGIN BATCH / END BATCH protocol ---
+                if query.eq_ignore_ascii_case("BEGIN BATCH") {
+                    let mut batch_stmts: Vec<dllb_query::ast::Statement> = Vec::new();
+                    let mut batch_err: Option<String> = None;
+
+                    while let Ok(Some(batch_line)) = lines.next_line().await {
+                        let bq = batch_line.trim().trim_end_matches(';').trim();
+                        if bq.eq_ignore_ascii_case("END BATCH") {
+                            break;
+                        }
+                        if bq.is_empty() {
+                            continue;
+                        }
+                        if batch_err.is_some() {
+                            // Already failed -- drain until END BATCH.
+                            continue;
+                        }
+                        match dllb_query::parse(bq) {
+                            Ok(q) => batch_stmts.push(q.statement),
+                            Err(err) => {
+                                batch_err = Some(
+                                    format_error(&err, dllb_query::OutcomeFormat::Json),
+                                );
+                            }
+                        }
+                    }
+
+                    let response = if let Some(err_resp) = batch_err {
+                        err_resp
+                    } else {
+                        let executor = QueryExecutor::new_with_cache(
+                            &storage,
+                            &ns,
+                            &db,
+                            Arc::clone(&cache),
+                            Arc::clone(&versions),
+                        );
+                        match executor.execute_batch(&batch_stmts) {
+                            Ok(result) => {
+                                format_result(&result, dllb_query::OutcomeFormat::Json)
+                            }
+                            Err(err) => {
+                                format_error(&err, dllb_query::OutcomeFormat::Json)
+                            }
+                        }
+                    };
+
+                    if writer
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let executor = QueryExecutor::new_with_cache(
                     &storage,
                     &ns,

@@ -25,6 +25,21 @@ pub trait KvStore: Send + Sync {
     /// Delete multiple keys in a single atomic transaction.
     fn delete_batch(&self, keys: &[&[u8]]) -> Result<()>;
 
+    /// Insert multiple key-value pairs and delete multiple keys in a single
+    /// atomic transaction. Deletes are applied before inserts so that a key
+    /// present in both lists ends up with the inserted value.
+    fn write_batch(&self, puts: &[(&[u8], &[u8])], deletes: &[&[u8]]) -> Result<()> {
+        // Default: two separate transactions (correct but not atomic across
+        // both). Backends should override for true atomicity.
+        if !deletes.is_empty() {
+            self.delete_batch(deletes)?;
+        }
+        if !puts.is_empty() {
+            self.put_batch(puts)?;
+        }
+        Ok(())
+    }
+
     /// Check whether `key` exists without reading the value.
     fn contains(&self, key: &[u8]) -> Result<bool> {
         Ok(self.get(key)?.is_some())
