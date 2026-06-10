@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
 use dllb_document::{Collection, Document};
-use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal};
+use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal, connected_components};
 use dllb_graph::{community::Algorithm, detect_communities_weighted};
 use dllb_storage::db::DllbStorage;
 
 use crate::ast::*;
-use crate::cache::{CacheKind, CacheKey, ComputeCache, WriteVersions};
+use crate::cache::{CacheKey, CacheKind, ComputeCache, WriteVersions};
 
 /// Result of executing a query.
 #[derive(Debug)]
@@ -40,6 +40,20 @@ pub enum QueryResult {
         count: usize,
         created: usize,
         updated: usize,
+    },
+    /// Number of rows affected by an `UPDATE` statement.
+    Update { matched: usize },
+    /// Row count from a `COUNT` statement.
+    Count { count: usize },
+    /// Connected-components summary from a `GRAPH COMPONENTS` statement.
+    ///
+    /// `count` is the number of components, `largest` the size of the biggest
+    /// component, and `nodes` the total number of vertices seen in the edge
+    /// list. Member lists are intentionally omitted to keep the response small.
+    Components {
+        count: i64,
+        largest: i64,
+        nodes: i64,
     },
 }
 
@@ -120,6 +134,13 @@ impl<'s> QueryExecutor<'s> {
                 max_iterations,
                 resolution,
             } => self.exec_graph_communities(table, algorithm, *max_iterations, *resolution),
+            Statement::Update {
+                target,
+                fields,
+                filter,
+            } => self.exec_update(target, fields, filter.as_ref()),
+            Statement::Count { table, filter } => self.exec_count(table, filter.as_ref()),
+            Statement::GraphComponents { table } => self.exec_graph_components(table),
         }
     }
 
@@ -163,12 +184,14 @@ impl<'s> QueryExecutor<'s> {
                 max_iterations,
                 resolution,
             } => {
-                let kind = CacheKind::communities(
-                    algo_str(algorithm),
-                    *max_iterations,
-                    *resolution,
-                );
+                let kind =
+                    CacheKind::communities(algo_str(algorithm), *max_iterations, *resolution);
                 let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                self.cache.get(&key, version)
+            }
+            Statement::GraphComponents { table } => {
+                let key = CacheKey::new(&self.ns, &self.db, table, CacheKind::Components, outcome);
                 let version = self.versions.current(&self.ns, &self.db, table);
                 self.cache.get(&key, version)
             }
@@ -196,14 +219,19 @@ impl<'s> QueryExecutor<'s> {
                 },
                 QueryResult::Communities { .. },
             ) => {
-                let kind = CacheKind::communities(
-                    algo_str(algorithm),
-                    *max_iterations,
-                    *resolution,
-                );
+                let kind =
+                    CacheKind::communities(algo_str(algorithm), *max_iterations, *resolution);
                 let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
                 // Read version *after* computation so the cached entry
                 // reflects the write state at time of result, not before.
+                let version = self.versions.current(&self.ns, &self.db, table);
+                let payload = crate::format::format_result(result, outcome);
+                self.cache.insert(key, payload, version);
+            }
+
+            // Populate cache after a successful components computation.
+            (Statement::GraphComponents { table }, QueryResult::Components { .. }) => {
+                let key = CacheKey::new(&self.ns, &self.db, table, CacheKind::Components, outcome);
                 let version = self.versions.current(&self.ns, &self.db, table);
                 let payload = crate::format::format_result(result, outcome);
                 self.cache.insert(key, payload, version);
@@ -462,8 +490,7 @@ impl<'s> QueryExecutor<'s> {
             .into_iter()
             .map(|(comm_id, members)| {
                 let size = members.len() as i64;
-                let members_val =
-                    Value::Array(members.into_iter().map(Value::String).collect());
+                let members_val = Value::Array(members.into_iter().map(Value::String).collect());
                 let mut row = BTreeMap::new();
                 row.insert("id".into(), Value::String(comm_id));
                 row.insert("size".into(), Value::Int(size));
@@ -494,6 +521,85 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Communities {
             algorithm: algo_name,
             groups,
+        })
+    }
+
+    fn exec_update(
+        &self,
+        target: &FromTarget,
+        fields: &[(String, Literal)],
+        filter: Option<&WhereClause>,
+    ) -> Result<QueryResult> {
+        let update_fields: BTreeMap<String, Value> = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_value()))
+            .collect();
+
+        match target {
+            // Single-record update: merge fields if the record exists.
+            FromTarget::Record(r) => {
+                let coll = Collection::new(self.storage, &self.ns, &self.db, &r.table);
+                if coll.get(&r.id)?.is_some() {
+                    coll.merge(&r.id, update_fields)?;
+                    Ok(QueryResult::Update { matched: 1 })
+                } else {
+                    Ok(QueryResult::Update { matched: 0 })
+                }
+            }
+            // Table update: merge fields into every row matching the filter.
+            FromTarget::Table(table) => {
+                let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+                let docs = coll.scan_all()?;
+                let mut matched = 0usize;
+                for doc in docs {
+                    let keep = match filter {
+                        Some(clause) => matches_where(&doc, clause),
+                        None => true,
+                    };
+                    if keep {
+                        coll.merge(&doc.id.id, update_fields.clone())?;
+                        matched += 1;
+                    }
+                }
+                Ok(QueryResult::Update { matched })
+            }
+        }
+    }
+
+    fn exec_count(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        let count = match filter {
+            None => coll.count()?,
+            Some(clause) => coll
+                .scan_all()?
+                .iter()
+                .filter(|d| matches_where(d, clause))
+                .count(),
+        };
+        Ok(QueryResult::Count { count })
+    }
+
+    fn exec_graph_components(&self, table: &str) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_outgoing()?;
+
+        let comps = connected_components(&edges);
+
+        let count = comps.len() as i64;
+        let mut largest = 0i64;
+        let mut nodes = 0i64;
+        for members in comps.groups.values() {
+            let size = members.len() as i64;
+            nodes += size;
+            if size > largest {
+                largest = size;
+            }
+        }
+
+        Ok(QueryResult::Components {
+            count,
+            largest,
+            nodes,
         })
     }
 
@@ -574,8 +680,7 @@ impl<'s> QueryExecutor<'s> {
                     dst,
                     fields,
                 } => {
-                    let store =
-                        EdgeStore::new(self.storage, &self.ns, &self.db, edge_type);
+                    let store = EdgeStore::new(self.storage, &self.ns, &self.db, edge_type);
                     let mut edge = Edge::new(&src.id, edge_type, &dst.id);
                     for (name, lit) in fields {
                         edge = edge.with_property(name, lit.to_value());
@@ -585,8 +690,7 @@ impl<'s> QueryExecutor<'s> {
                 }
                 _ => {
                     return Err(dllb_core::Error::Query(
-                        "only CREATE and RELATE statements are supported inside BEGIN BATCH"
-                            .into(),
+                        "only CREATE and RELATE statements are supported inside BEGIN BATCH".into(),
                     ));
                 }
             }
@@ -689,6 +793,12 @@ fn matches_where(doc: &Document, clause: &WhereClause) -> bool {
             }
         }
         WhereClause::And(left, right) => matches_where(doc, left) && matches_where(doc, right),
+        WhereClause::IsNull { field, negated } => {
+            // A field is "set" when present and not `Value::None`.
+            let is_set = doc.fields.get(field).is_some_and(|v| !v.is_none());
+            // `IS NONE` matches unset fields; `IS NOT NONE` matches set fields.
+            if *negated { is_set } else { !is_set }
+        }
     }
 }
 

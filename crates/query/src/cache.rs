@@ -105,6 +105,8 @@ pub enum CacheKind {
         /// `f64::to_bits()` of the resolution parameter.
         resolution_bits: u64,
     },
+    /// `GRAPH COMPONENTS` -- connected components (no parameters).
+    Components,
 }
 
 impl CacheKind {
@@ -133,13 +135,7 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
-    pub fn new(
-        ns: &str,
-        db: &str,
-        table: &str,
-        kind: CacheKind,
-        outcome: OutcomeFormat,
-    ) -> Self {
+    pub fn new(ns: &str, db: &str, table: &str, kind: CacheKind, outcome: OutcomeFormat) -> Self {
         CacheKey {
             ns: ns.into(),
             db: db.into(),

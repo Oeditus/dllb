@@ -55,6 +55,279 @@ fn create_and_select_star() {
     }
 }
 
+// -------------------------------------------------------------------
+// UPDATE
+// -------------------------------------------------------------------
+
+#[test]
+fn update_record_merges_fields() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:alice SET name = 'Alice', age = 30;")
+        .unwrap();
+
+    let (result, _) = e.run("UPDATE user:alice SET age = 31;").unwrap();
+    assert!(matches!(result, QueryResult::Update { matched: 1 }));
+
+    // age updated, name preserved (partial SET semantics).
+    let (result, _) = e.run("SELECT * FROM user:alice;").unwrap();
+    match result {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            assert_eq!(rows[0].get("age"), Some(&Value::Int(31)));
+        }
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn update_missing_record_matches_zero() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let (result, _) = e.run("UPDATE user:ghost SET age = 1;").unwrap();
+    assert!(matches!(result, QueryResult::Update { matched: 0 }));
+}
+
+#[test]
+fn update_table_with_where_matches_subset() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30;").unwrap();
+    e.run("CREATE user:b SET age = 30;").unwrap();
+    e.run("CREATE user:c SET age = 20;").unwrap();
+
+    let (result, _) = e
+        .run("UPDATE user SET tier = 'gold' WHERE age = 30;")
+        .unwrap();
+    assert!(matches!(result, QueryResult::Update { matched: 2 }));
+
+    let (result, _) = e.run("SELECT * FROM user WHERE tier = 'gold';").unwrap();
+    match result {
+        QueryResult::Rows(rows) => assert_eq!(rows.len(), 2),
+        _ => panic!("expected Rows"),
+    }
+}
+
+#[test]
+fn update_table_without_where_updates_all() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30;").unwrap();
+    e.run("CREATE user:b SET age = 40;").unwrap();
+
+    let (result, _) = e.run("UPDATE user SET active = true;").unwrap();
+    assert!(matches!(result, QueryResult::Update { matched: 2 }));
+}
+
+// -------------------------------------------------------------------
+// COUNT + IS [NOT] NONE
+// -------------------------------------------------------------------
+
+#[test]
+fn count_all_rows() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET name = 'A';").unwrap();
+    e.run("CREATE user:b SET name = 'B';").unwrap();
+    e.run("CREATE user:c SET name = 'C';").unwrap();
+
+    let (result, _) = e.run("COUNT user;").unwrap();
+    assert!(matches!(result, QueryResult::Count { count: 3 }));
+}
+
+#[test]
+fn count_with_where() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30;").unwrap();
+    e.run("CREATE user:b SET age = 30;").unwrap();
+    e.run("CREATE user:c SET age = 20;").unwrap();
+
+    let (result, _) = e.run("COUNT user WHERE age = 30;").unwrap();
+    assert!(matches!(result, QueryResult::Count { count: 2 }));
+}
+
+#[test]
+fn count_is_not_none_and_is_none() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Two rows carry `tag`, one does not.
+    e.run("CREATE node:a SET name = 'a', tag = 'x';").unwrap();
+    e.run("CREATE node:b SET name = 'b', tag = 'y';").unwrap();
+    e.run("CREATE node:c SET name = 'c';").unwrap();
+
+    let (set_count, _) = e.run("COUNT node WHERE tag IS NOT NONE;").unwrap();
+    assert!(matches!(set_count, QueryResult::Count { count: 2 }));
+
+    let (unset_count, _) = e.run("COUNT node WHERE tag IS NONE;").unwrap();
+    assert!(matches!(unset_count, QueryResult::Count { count: 1 }));
+}
+
+#[test]
+fn count_is_not_none_counts_embeddings_set_via_update() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Simulate the embedding-write path: rows exist, then a value is attached
+    // by a filtered UPDATE. Only updated rows count as "vectors".
+    e.run("CREATE ast_node:f1 SET kind = 'function_def';")
+        .unwrap();
+    e.run("CREATE ast_node:f2 SET kind = 'function_def';")
+        .unwrap();
+
+    let (before, _) = e.run("COUNT ast_node WHERE emb IS NOT NONE;").unwrap();
+    assert!(matches!(before, QueryResult::Count { count: 0 }));
+
+    e.run("UPDATE ast_node:f1 SET emb = 'vec';").unwrap();
+
+    let (after, _) = e.run("COUNT ast_node WHERE emb IS NOT NONE;").unwrap();
+    assert!(matches!(after, QueryResult::Count { count: 1 }));
+}
+
+#[test]
+fn update_stores_array_embedding_counted_by_is_not_none() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE ast_node:f1 SET kind = 'function_def';")
+        .unwrap();
+
+    // Array literal exercising decimal, negative, and exponent components --
+    // the shape an embedding write produces.
+    e.run("UPDATE ast_node:f1 SET source_embedding = [0.1, -0.2, 1.0e-5];")
+        .unwrap();
+
+    let (count, _) = e
+        .run("COUNT ast_node WHERE source_embedding IS NOT NONE;")
+        .unwrap();
+    assert!(matches!(count, QueryResult::Count { count: 1 }));
+
+    // The value round-trips as a Value::Array of floats.
+    let (rows, _) = e.run("SELECT * FROM ast_node:f1;").unwrap();
+    match rows {
+        QueryResult::Rows(rows) => match rows[0].get("source_embedding") {
+            Some(Value::Array(items)) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Value::Float(0.1));
+                assert_eq!(items[1], Value::Float(-0.2));
+            }
+            other => panic!("expected array embedding, got {other:?}"),
+        },
+        _ => panic!("expected Rows"),
+    }
+}
+
+// -------------------------------------------------------------------
+// GRAPH COMPONENTS
+// -------------------------------------------------------------------
+
+/// Two disjoint triangles on the `calls` edge table (no bridge).
+fn build_two_disjoint_triangles(storage: &DllbStorage) {
+    let e = exec(storage);
+    for (a, b) in [("a1", "a2"), ("a2", "a3"), ("a3", "a1")] {
+        e.run(&format!("RELATE fn:{a}->calls->fn:{b}")).unwrap();
+    }
+    for (a, b) in [("b1", "b2"), ("b2", "b3"), ("b3", "b1")] {
+        e.run(&format!("RELATE fn:{a}->calls->fn:{b}")).unwrap();
+    }
+}
+
+#[test]
+fn components_counts_disjoint_clusters() {
+    let (_dir, storage) = temp_storage();
+    build_two_disjoint_triangles(&storage);
+
+    let e = exec(&storage);
+    let (result, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    match result {
+        QueryResult::Components {
+            count,
+            largest,
+            nodes,
+        } => {
+            assert_eq!(count, 2);
+            assert_eq!(largest, 3);
+            assert_eq!(nodes, 6);
+        }
+        _ => panic!("expected Components"),
+    }
+}
+
+#[test]
+fn components_bridge_merges_clusters() {
+    let (_dir, storage) = temp_storage();
+    // Two clusters joined by a weak bridge -> a single component.
+    build_two_cluster_graph(&storage);
+
+    let e = exec(&storage);
+    let (result, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    match result {
+        QueryResult::Components { count, nodes, .. } => {
+            assert_eq!(count, 1);
+            assert_eq!(nodes, 6);
+        }
+        _ => panic!("expected Components"),
+    }
+}
+
+#[test]
+fn components_empty_graph() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    let (result, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    match result {
+        QueryResult::Components {
+            count,
+            largest,
+            nodes,
+        } => {
+            assert_eq!(count, 0);
+            assert_eq!(largest, 0);
+            assert_eq!(nodes, 0);
+        }
+        _ => panic!("expected Components"),
+    }
+}
+
+#[test]
+fn components_second_call_is_cache_hit_and_relate_invalidates() {
+    let (_dir, storage) = temp_storage();
+    build_two_disjoint_triangles(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
+
+    let e1 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (first, _) = e1.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(matches!(first, QueryResult::Components { .. }));
+
+    let e2 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (second, _) = e2.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(
+        matches!(second, QueryResult::CachedResponse(_)),
+        "second call should hit the cache"
+    );
+
+    // A new edge bumps the version and invalidates the cache.
+    let e3 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    e3.run("RELATE fn:a1->calls->fn:b1").unwrap();
+
+    let e4 = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (after, _) = e4.run("GRAPH COMPONENTS calls").unwrap();
+    match after {
+        QueryResult::Components { count, .. } => assert_eq!(count, 1),
+        _ => panic!("expected recomputed Components after RELATE"),
+    }
+}
+
 #[test]
 fn create_returns_id() {
     let (_dir, storage) = temp_storage();
@@ -818,7 +1091,10 @@ fn communities_cache_result_is_consistent_with_fresh_compute() {
     let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
     let (first, _) = e.run("GRAPH COMMUNITIES calls").unwrap();
     let first_json = match first {
-        QueryResult::Communities { ref algorithm, ref groups } => {
+        QueryResult::Communities {
+            ref algorithm,
+            ref groups,
+        } => {
             format!("{}:{}", algorithm, groups.len())
         }
         _ => panic!("expected Communities"),
@@ -951,13 +1227,11 @@ fn batch_rejects_select() {
     let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
-    let stmts: Vec<dllb_query::ast::Statement> = [
-        "CREATE user:alice SET name = 'Alice'",
-        "SELECT * FROM user",
-    ]
-    .into_iter()
-    .map(|q| dllb_query::parse(q).unwrap().statement)
-    .collect();
+    let stmts: Vec<dllb_query::ast::Statement> =
+        ["CREATE user:alice SET name = 'Alice'", "SELECT * FROM user"]
+            .into_iter()
+            .map(|q| dllb_query::parse(q).unwrap().statement)
+            .collect();
 
     let err = e.execute_batch(&stmts);
     assert!(err.is_err(), "batch should reject SELECT");

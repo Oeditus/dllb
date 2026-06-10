@@ -89,8 +89,12 @@ pub enum QueryResult {
 | CREATE | `Collection::create_with_id()` |
 | SELECT (table) | `Collection::scan_all()` + in-memory filter |
 | SELECT (record) | `Collection::get()` |
+| UPDATE | `Collection::merge()` (per matching row) |
+| COUNT | `Collection::count()` / `scan_all()` + filter |
 | DELETE | `Collection::delete()` |
 | RELATE | `EdgeStore::relate()` |
+| GRAPH COMMUNITIES | `dllb_graph::detect_communities_weighted()` |
+| GRAPH COMPONENTS | `dllb_graph::connected_components()` |
 
 ## Examples
 
@@ -113,12 +117,26 @@ DELETE user:alice;
 
 -- Create graph edge
 RELATE user:alice->knows->user:bob SET since = 2020;
+
+-- Partial update by record id (only the listed fields change)
+UPDATE user:alice SET age = 31;
+
+-- Update every row matching a filter
+UPDATE user SET tier = 'gold' WHERE age >= 30;
+
+-- Count rows, optionally filtered. `IS [NOT] NONE` tests field presence.
+COUNT user;
+COUNT user WHERE age = 30;
+COUNT ast_node WHERE source_embedding IS NOT NONE;
+
+-- Connected components over an edge table (returns a compact summary:
+-- component_count, largest, nodes).
+GRAPH COMPONENTS calls;
 ```
 
 ## Future Extensions
 
-- UPDATE/MERGE statements
-- ORDER BY, LIMIT, GROUP BY
+- ORDER BY, GROUP BY (general aggregation; `COUNT` is already supported)
 - Graph traversal in SELECT (`->edge->` syntax)
 - Full-text `@@` operator
 - Vector KNN `<|K,ef|>` operator

@@ -32,6 +32,8 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         Some(Token::Select) => parse_select(tokens, pos),
         Some(Token::Delete) => parse_delete(tokens, pos),
         Some(Token::Relate) => parse_relate(tokens, pos),
+        Some(Token::Update) => parse_update(tokens, pos),
+        Some(Token::Count) => parse_count(tokens, pos),
         Some(Token::Graph) => parse_graph(tokens, pos),
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
@@ -223,6 +225,45 @@ fn parse_delete(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
 }
 
 // -----------------------------------------------------------------------
+// UPDATE table[:id] SET field = value, ... [WHERE clause]
+// -----------------------------------------------------------------------
+
+fn parse_update(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect(tokens, pos, &Token::Update)?;
+    let table = expect_ident(tokens, pos)?;
+
+    // Optional :id selects a single record; otherwise the whole table.
+    let target = if matches!(tokens.get(*pos), Some(Token::Colon)) {
+        *pos += 1;
+        let id = expect_ident(tokens, pos)?;
+        FromTarget::Record(RecordRef { table, id })
+    } else {
+        FromTarget::Table(table)
+    };
+
+    expect(tokens, pos, &Token::Set)?;
+    let fields = parse_set_clause(tokens, pos)?;
+    let filter = parse_where_clause(tokens, pos)?;
+
+    Ok(Statement::Update {
+        target,
+        fields,
+        filter,
+    })
+}
+
+// -----------------------------------------------------------------------
+// COUNT table [WHERE clause]
+// -----------------------------------------------------------------------
+
+fn parse_count(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect(tokens, pos, &Token::Count)?;
+    let table = expect_ident(tokens, pos)?;
+    let filter = parse_where_clause(tokens, pos)?;
+    Ok(Statement::Count { table, filter })
+}
+
+// -----------------------------------------------------------------------
 // GRAPH COMMUNITIES <table> [ALGORITHM louvain|lp] [MAX_ITER n] [RESOLUTION f]
 // -----------------------------------------------------------------------
 
@@ -230,13 +271,22 @@ fn parse_graph(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Graph)?;
     match tokens.get(*pos) {
         Some(Token::Communities) => parse_graph_communities(tokens, pos),
+        Some(Token::Components) => parse_graph_components(tokens, pos),
         Some(t) => Err(Error::Query(format!(
-            "expected COMMUNITIES after GRAPH, got {t:?}"
+            "expected COMMUNITIES or COMPONENTS after GRAPH, got {t:?}"
         ))),
-        None => Err(Error::Query(
-            "unexpected end of input after GRAPH".into(),
-        )),
+        None => Err(Error::Query("unexpected end of input after GRAPH".into())),
     }
+}
+
+// -----------------------------------------------------------------------
+// GRAPH COMPONENTS <table>
+// -----------------------------------------------------------------------
+
+fn parse_graph_components(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect(tokens, pos, &Token::Components)?;
+    let table = expect_ident(tokens, pos)?;
+    Ok(Statement::GraphComponents { table })
 }
 
 fn parse_graph_communities(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
@@ -414,9 +464,24 @@ fn parse_where_expr(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
     Ok(left)
 }
 
-/// Parse a single `field op literal` comparison.
+/// Parse a single `field op literal` comparison, or a `field IS [NOT] NONE`
+/// null predicate.
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
     let field = expect_ident(tokens, pos)?;
+
+    // `field IS [NOT] NONE`
+    if matches!(tokens.get(*pos), Some(Token::Is)) {
+        *pos += 1;
+        let negated = if matches!(tokens.get(*pos), Some(Token::Not)) {
+            *pos += 1;
+            true
+        } else {
+            false
+        };
+        expect(tokens, pos, &Token::None)?;
+        return Ok(WhereClause::IsNull { field, negated });
+    }
+
     let op = parse_cmp_op(tokens, pos)?;
     let value = parse_literal(tokens, pos)?;
     Ok(WhereClause::Cmp { field, op, value })
@@ -487,11 +552,45 @@ fn parse_literal(tokens: &[Token], pos: &mut usize) -> Result<Literal> {
             *pos += 1;
             Ok(Literal::None)
         }
+        Some(Token::LBracket) => parse_array_literal(tokens, pos),
         Some(t) => Err(Error::Query(format!("expected literal, got {t:?}"))),
         None => Err(Error::Query(
             "unexpected end of input, expected literal".into(),
         )),
     }
+}
+
+/// Parse an array literal: `[ literal, literal, ... ]` (possibly empty).
+fn parse_array_literal(tokens: &[Token], pos: &mut usize) -> Result<Literal> {
+    expect(tokens, pos, &Token::LBracket)?;
+    let mut items = Vec::new();
+
+    // Empty array.
+    if matches!(tokens.get(*pos), Some(Token::RBracket)) {
+        *pos += 1;
+        return Ok(Literal::Array(items));
+    }
+
+    loop {
+        items.push(parse_literal(tokens, pos)?);
+        match tokens.get(*pos) {
+            Some(Token::Comma) => *pos += 1,
+            Some(Token::RBracket) => {
+                *pos += 1;
+                break;
+            }
+            Some(t) => {
+                return Err(Error::Query(format!(
+                    "expected ',' or ']' in array literal, got {t:?}"
+                )));
+            }
+            None => {
+                return Err(Error::Query("unterminated array literal".into()));
+            }
+        }
+    }
+
+    Ok(Literal::Array(items))
 }
 
 fn expect(tokens: &[Token], pos: &mut usize, expected: &Token) -> Result<()> {

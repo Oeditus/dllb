@@ -72,6 +72,21 @@ fn format_result_json(result: &QueryResult) -> String {
                 groups.len()
             )
         }
+        QueryResult::Update { matched } => {
+            format!(r#"{{"status":"update","matched":{matched}}}"#)
+        }
+        QueryResult::Count { count } => {
+            format!(r#"{{"status":"count","count":{count}}}"#)
+        }
+        QueryResult::Components {
+            count,
+            largest,
+            nodes,
+        } => {
+            format!(
+                r#"{{"status":"components","component_count":{count},"largest":{largest},"nodes":{nodes}}}"#
+            )
+        }
     }
 }
 
@@ -126,6 +141,21 @@ fn format_result_toon(result: &QueryResult) -> String {
                 }
             }
             out
+        }
+        QueryResult::Update { matched } => {
+            format!("status = \"update\"\nmatched = {matched}")
+        }
+        QueryResult::Count { count } => {
+            format!("status = \"count\"\ncount = {count}")
+        }
+        QueryResult::Components {
+            count,
+            largest,
+            nodes,
+        } => {
+            format!(
+                "status = \"components\"\ncomponent_count = {count}\nlargest = {largest}\nnodes = {nodes}"
+            )
         }
     }
 }
@@ -189,6 +219,15 @@ fn format_result_csv(result: &QueryResult) -> String {
         }
         QueryResult::Rows(rows) => format_rows_csv(rows),
         QueryResult::Communities { groups, .. } => format_rows_csv(groups),
+        QueryResult::Update { matched } => format!("status,matched\nupdate,{matched}"),
+        QueryResult::Count { count } => format!("status,count\ncount,{count}"),
+        QueryResult::Components {
+            count,
+            largest,
+            nodes,
+        } => {
+            format!("status,component_count,largest,nodes\ncomponents,{count},{largest},{nodes}")
+        }
     }
 }
 

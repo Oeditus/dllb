@@ -73,6 +73,27 @@ pub enum Statement {
         max_iterations: usize,
         resolution: f64,
     },
+    /// `UPDATE <table>[:<id>] SET field = value, ... [WHERE clause]`
+    ///
+    /// `SET` applies partial-update (merge) semantics: only the listed fields
+    /// are changed. When `target` is a `Record`, `filter` is `None` and at most
+    /// one row is affected; when `target` is a `Table`, the optional `filter`
+    /// selects the rows to update.
+    Update {
+        target: FromTarget,
+        fields: Vec<(String, Literal)>,
+        filter: Option<WhereClause>,
+    },
+    /// `COUNT <table> [WHERE clause]` -- server-side row count.
+    Count {
+        table: String,
+        filter: Option<WhereClause>,
+    },
+    /// `GRAPH COMPONENTS <table>` -- connected components over an edge table.
+    GraphComponents {
+        /// Edge table (edge type) to compute connected components over.
+        table: String,
+    },
 }
 
 /// Which fields to return in a SELECT.
@@ -161,6 +182,9 @@ pub enum WhereClause {
     },
     /// `left AND right`
     And(Box<WhereClause>, Box<WhereClause>),
+    /// `field IS [NOT] NONE` -- null / not-null predicate. `negated` is `true`
+    /// for `IS NOT NONE`.
+    IsNull { field: String, negated: bool },
 }
 
 /// A literal value in the query language.
@@ -171,6 +195,8 @@ pub enum Literal {
     Float(f64),
     Bool(bool),
     None,
+    /// `[literal, literal, ...]` -- an array literal (e.g. a dense embedding).
+    Array(Vec<Literal>),
 }
 
 impl Literal {
@@ -182,6 +208,9 @@ impl Literal {
             Literal::Float(f) => dllb_core::Value::Float(*f),
             Literal::Bool(b) => dllb_core::Value::Bool(*b),
             Literal::None => dllb_core::Value::None,
+            Literal::Array(items) => {
+                dllb_core::Value::Array(items.iter().map(Literal::to_value).collect())
+            }
         }
     }
 }

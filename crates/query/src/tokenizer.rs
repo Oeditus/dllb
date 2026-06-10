@@ -23,6 +23,10 @@ pub enum Token {
     Outcome,
     Graph,
     Communities,
+    Components,
+    Count,
+    Is,
+    Not,
     // Literals
     Ident(String),
     StringLit(String),
@@ -45,6 +49,8 @@ pub enum Token {
     Arrow,     // ->
     BackArrow, // <-
     Dot,       // .
+    LBracket,  // [
+    RBracket,  // ]
 }
 
 /// Tokenize an input string into a list of tokens.
@@ -155,6 +161,16 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 i += 1;
                 continue;
             }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+                continue;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+                continue;
+            }
             _ => {}
         }
 
@@ -175,7 +191,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // Number (int or float).
+        // Number (int or float, with optional `.fraction` and `e[+/-]exp`).
         if c.is_ascii_digit() || (c == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
         {
             let start = i;
@@ -185,18 +201,41 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             while i < chars.len() && chars[i].is_ascii_digit() {
                 i += 1;
             }
+
+            let mut is_float = false;
+
+            // Fractional part.
             if i < chars.len() && chars[i] == '.' {
+                is_float = true;
                 i += 1;
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
                 }
-                let s: String = chars[start..i].iter().collect();
+            }
+
+            // Exponent part, e.g. `1.0e-5` or `2E10`. Only consume when it is a
+            // well-formed exponent (optional sign followed by at least one digit).
+            if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+                let mut j = i + 1;
+                if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j].is_ascii_digit() {
+                    is_float = true;
+                    i = j;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+            }
+
+            let s: String = chars[start..i].iter().collect();
+            if is_float {
                 let f: f64 = s
                     .parse()
                     .map_err(|_| Error::Query(format!("invalid float: {s}")))?;
                 tokens.push(Token::FloatLit(f));
             } else {
-                let s: String = chars[start..i].iter().collect();
                 let n: i64 = s
                     .parse()
                     .map_err(|_| Error::Query(format!("invalid integer: {s}")))?;
@@ -228,6 +267,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                 "OUTCOME" => Token::Outcome,
                 "GRAPH" => Token::Graph,
                 "COMMUNITIES" => Token::Communities,
+                "COMPONENTS" => Token::Components,
+                "COUNT" => Token::Count,
+                "IS" => Token::Is,
+                "NOT" => Token::Not,
                 "TRUE" => Token::True,
                 "FALSE" => Token::False,
                 "NONE" | "NULL" => Token::None,
