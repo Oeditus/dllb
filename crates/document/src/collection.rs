@@ -16,6 +16,13 @@ use crate::index::{self, IndexDefinition};
 use crate::serde::{deserialize, serialize};
 use crate::validate::validate_document;
 
+/// A single key/value put operation.
+type PutOp = (Vec<u8>, Vec<u8>);
+/// A batch of key/value put operations.
+type PutOps = Vec<PutOp>;
+/// A batch of keys to delete.
+type DeleteOps = Vec<Vec<u8>>;
+
 /// A document collection scoped to a namespace/database/table.
 pub struct Collection<'s> {
     storage: &'s DllbStorage,
@@ -124,7 +131,7 @@ impl<'s> Collection<'s> {
         &self,
         id: &str,
         mut doc: Document,
-    ) -> Result<(RecordId, Vec<(Vec<u8>, Vec<u8>)>)> {
+    ) -> Result<(RecordId, PutOps)> {
         doc.id = RecordId::new(&self.table, id);
 
         if let Some(schema) = &self.schema {
@@ -137,7 +144,7 @@ impl<'s> Collection<'s> {
         let idx_entries =
             index::build_index_entries(&doc, &self.ns, &self.db, &self.table, &self.indexes)?;
 
-        let mut ops: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1 + idx_entries.len());
+        let mut ops: PutOps = Vec::with_capacity(1 + idx_entries.len());
         ops.push((doc_key, doc_bytes));
         for (k, v) in idx_entries {
             ops.push((k, v));
@@ -156,7 +163,7 @@ impl<'s> Collection<'s> {
         id: &str,
         doc: Document,
         update_fields: BTreeMap<String, Value>,
-    ) -> Result<(RecordId, bool, Vec<(Vec<u8>, Vec<u8>)>, Vec<Vec<u8>>)> {
+    ) -> Result<(RecordId, bool, PutOps, DeleteOps)> {
         let doc_key = key::document_key(&self.ns, &self.db, &self.table, id);
 
         if self.storage.contains(&doc_key)? {
@@ -191,9 +198,9 @@ impl<'s> Collection<'s> {
                 &self.indexes,
             )?;
 
-            let delete_ops: Vec<Vec<u8>> = old_idx.into_iter().map(|(k, _)| k).collect();
+            let delete_ops: DeleteOps = old_idx.into_iter().map(|(k, _)| k).collect();
 
-            let mut put_ops: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1 + new_idx.len());
+            let mut put_ops: PutOps = Vec::with_capacity(1 + new_idx.len());
             put_ops.push((doc_key, new_bytes));
             for (k, v) in new_idx {
                 put_ops.push((k, v));
