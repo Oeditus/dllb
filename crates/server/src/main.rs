@@ -82,9 +82,8 @@ async fn main() {
                         match dllb_query::parse(bq) {
                             Ok(q) => batch_stmts.push(q.statement),
                             Err(err) => {
-                                batch_err = Some(
-                                    format_error(&err, dllb_query::OutcomeFormat::Json),
-                                );
+                                batch_err =
+                                    Some(format_error(&err, dllb_query::OutcomeFormat::Json));
                             }
                         }
                     }
@@ -100,12 +99,8 @@ async fn main() {
                             Arc::clone(&versions),
                         );
                         match executor.execute_batch(&batch_stmts) {
-                            Ok(result) => {
-                                format_result(&result, dllb_query::OutcomeFormat::Json)
-                            }
-                            Err(err) => {
-                                format_error(&err, dllb_query::OutcomeFormat::Json)
-                            }
+                            Ok(result) => format_result(&result, dllb_query::OutcomeFormat::Json),
+                            Err(err) => format_error(&err, dllb_query::OutcomeFormat::Json),
                         }
                     };
 

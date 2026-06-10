@@ -160,7 +160,10 @@ fn louvain(edges: &[(String, String, f64)], opts: &Options) -> Communities {
 
     if m == 0.0 {
         // No usable edges — every node is its own community.
-        let groups = all_nodes.into_iter().map(|n| (n.clone(), vec![n])).collect();
+        let groups = all_nodes
+            .into_iter()
+            .map(|n| (n.clone(), vec![n]))
+            .collect();
         return Communities { groups };
     }
 
@@ -172,10 +175,8 @@ fn louvain(edges: &[(String, String, f64)], opts: &Options) -> Communities {
 
     // Phase initialisation: each node starts in its own singleton community.
     // community ID = the node's own string ID.
-    let mut node_to_comm: HashMap<String, String> = all_nodes
-        .iter()
-        .map(|n| (n.clone(), n.clone()))
-        .collect();
+    let mut node_to_comm: HashMap<String, String> =
+        all_nodes.iter().map(|n| (n.clone(), n.clone())).collect();
 
     // σ_tot[c] = sum of degrees of all nodes currently assigned to community c.
     let mut sigma_tot: HashMap<String, f64> = all_nodes

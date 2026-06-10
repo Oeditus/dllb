@@ -193,8 +193,7 @@ impl<'s> Collection<'s> {
 
             let delete_ops: Vec<Vec<u8>> = old_idx.into_iter().map(|(k, _)| k).collect();
 
-            let mut put_ops: Vec<(Vec<u8>, Vec<u8>)> =
-                Vec::with_capacity(1 + new_idx.len());
+            let mut put_ops: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1 + new_idx.len());
             put_ops.push((doc_key, new_bytes));
             for (k, v) in new_idx {
                 put_ops.push((k, v));

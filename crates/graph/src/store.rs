@@ -125,7 +125,10 @@ impl<'s> EdgeStore<'s> {
         for (k, v) in entries {
             let parts = key::parse_key(&k)?;
             // remainder = src\0<dir>edge_type\0dst
-            let segs: Vec<&[u8]> = parts.remainder.splitn(3, |&b| b == key::SEPARATOR).collect();
+            let segs: Vec<&[u8]> = parts
+                .remainder
+                .splitn(3, |&b| b == key::SEPARATOR)
+                .collect();
             if segs.len() < 3 {
                 continue;
             }

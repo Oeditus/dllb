@@ -250,15 +250,32 @@ fn scan_all_outgoing_feeds_detect() {
     let store = EdgeStore::new(&storage, "ns", "db", "calls");
 
     // Insert a small two-cluster graph via RELATE.
-    for (s, d) in [("a1", "a2"), ("a2", "a3"), ("a3", "a1"), ("b1", "b2"), ("b2", "b3"), ("b3", "b1"), ("a1", "b1")] {
+    for (s, d) in [
+        ("a1", "a2"),
+        ("a2", "a3"),
+        ("a3", "a1"),
+        ("b1", "b2"),
+        ("b2", "b3"),
+        ("b3", "b1"),
+        ("a1", "b1"),
+    ] {
         store.relate(&Edge::new(s, "calls", d)).unwrap();
     }
 
     let edges = store.scan_all_outgoing().unwrap();
-    assert_eq!(edges.len(), 7, "expected 7 outgoing edges, got {}", edges.len());
+    assert_eq!(
+        edges.len(),
+        7,
+        "expected 7 outgoing edges, got {}",
+        edges.len()
+    );
 
     // All weights default to 1.0 (no weight property set).
-    assert!(edges.iter().all(|(_, _, w)| (*w - 1.0).abs() < f64::EPSILON));
+    assert!(
+        edges
+            .iter()
+            .all(|(_, _, w)| (*w - 1.0).abs() < f64::EPSILON)
+    );
 
     // Clusters must still be recoverable.
     let opts = Options::default();
