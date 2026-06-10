@@ -127,11 +127,7 @@ impl<'s> Collection<'s> {
     ///
     /// Returns `(record_id, put_ops)`. The caller is responsible for
     /// executing the puts (typically via `storage.put_batch`).
-    pub fn create_to_ops(
-        &self,
-        id: &str,
-        mut doc: Document,
-    ) -> Result<(RecordId, PutOps)> {
+    pub fn create_to_ops(&self, id: &str, mut doc: Document) -> Result<(RecordId, PutOps)> {
         doc.id = RecordId::new(&self.table, id);
 
         if let Some(schema) = &self.schema {
