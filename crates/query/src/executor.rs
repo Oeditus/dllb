@@ -1,13 +1,14 @@
 //! Query executor: maps parsed [`Statement`]s to concrete crate API calls.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
-use dllb_document::{Collection, Document};
+use dllb_document::{Collection, Document, IndexDefinition, index};
 use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal, connected_components};
 use dllb_graph::{community::Algorithm, detect_communities_weighted};
 use dllb_storage::db::DllbStorage;
+use dllb_storage::key;
 
 use crate::ast::*;
 use crate::cache::{CacheKey, CacheKind, ComputeCache, WriteVersions};
@@ -141,6 +142,13 @@ impl<'s> QueryExecutor<'s> {
             } => self.exec_update(target, fields, filter.as_ref()),
             Statement::Count { table, filter } => self.exec_count(table, filter.as_ref()),
             Statement::GraphComponents { table } => self.exec_graph_components(table),
+            Statement::DefineIndex {
+                name,
+                table,
+                fields,
+                unique,
+            } => self.exec_define_index(name, table, fields, *unique),
+            Statement::RemoveIndex { name, table } => self.exec_remove_index(name, table),
         }
     }
 
@@ -252,7 +260,9 @@ impl<'s> QueryExecutor<'s> {
         fields: &[(String, Literal)],
         on_conflict: Option<&crate::ast::OnConflict>,
     ) -> Result<QueryResult> {
-        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        // Catalog-aware so index entries are written and unique constraints
+        // enforced.
+        let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
 
         let record_id = match id {
             Some(id) => RecordId::new(table, id),
@@ -316,8 +326,19 @@ impl<'s> QueryExecutor<'s> {
 
         let (table, docs) = match from {
             FromTarget::Table(table) => {
-                let coll = Collection::new(self.storage, &self.ns, &self.db, table);
-                (table.as_str(), coll.scan_all()?)
+                let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
+                // Use a secondary index when the filter has an equality
+                // predicate on an indexed field; otherwise fall back to a
+                // full scan. The full WHERE is still applied below, so this
+                // only changes which documents are read off disk.
+                let docs = match filter.and_then(|c| plan_index_lookup(coll.indexes(), c)) {
+                    Some(plan) => {
+                        let ids = coll.find_ids_by_index(&plan.index_name, &plan.value)?;
+                        coll.get_many(&ids)?
+                    }
+                    None => coll.scan_all()?,
+                };
+                (table.as_str(), docs)
             }
             FromTarget::Record(r) => {
                 let coll = Collection::new(self.storage, &self.ns, &self.db, &r.table);
@@ -539,7 +560,7 @@ impl<'s> QueryExecutor<'s> {
         match target {
             // Single-record update: merge fields if the record exists.
             FromTarget::Record(r) => {
-                let coll = Collection::new(self.storage, &self.ns, &self.db, &r.table);
+                let coll = Collection::load(self.storage, &self.ns, &self.db, &r.table)?;
                 if coll.get(&r.id)?.is_some() {
                     coll.merge(&r.id, update_fields)?;
                     Ok(QueryResult::Update { matched: 1 })
@@ -549,7 +570,7 @@ impl<'s> QueryExecutor<'s> {
             }
             // Table update: merge fields into every row matching the filter.
             FromTarget::Table(table) => {
-                let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+                let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
                 let docs = coll.scan_all()?;
                 let mut matched = 0usize;
                 for doc in docs {
@@ -568,14 +589,32 @@ impl<'s> QueryExecutor<'s> {
     }
 
     fn exec_count(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
-        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
         let count = match filter {
+            // COUNT(*) is a cheap key-range cardinality.
             None => coll.count()?,
-            Some(clause) => coll
-                .scan_all()?
-                .iter()
-                .filter(|d| matches_where(d, clause))
-                .count(),
+            Some(clause) => match plan_index_lookup(coll.indexes(), clause) {
+                Some(plan) => {
+                    let ids = coll.find_ids_by_index(&plan.index_name, &plan.value)?;
+                    if plan.covers {
+                        // The index fully answers the predicate: the number of
+                        // matching IDs is the count, no documents are read.
+                        ids.len()
+                    } else {
+                        // Index narrows the candidates; apply the residual
+                        // predicate to the fetched documents.
+                        coll.get_many(&ids)?
+                            .iter()
+                            .filter(|d| matches_where(d, clause))
+                            .count()
+                    }
+                }
+                None => coll
+                    .scan_all()?
+                    .iter()
+                    .filter(|d| matches_where(d, clause))
+                    .count(),
+            },
         };
         Ok(QueryResult::Count { count })
     }
@@ -624,6 +663,9 @@ impl<'s> QueryExecutor<'s> {
         let mut all_deletes: Vec<Vec<u8>> = Vec::new();
         let mut created: usize = 0;
         let mut updated: usize = 0;
+        // Cache each table's index definitions so the catalog is loaded at
+        // most once per distinct table across the whole batch.
+        let mut idx_cache: HashMap<String, Vec<IndexDefinition>> = HashMap::new();
 
         for stmt in stmts {
             match stmt {
@@ -633,7 +675,13 @@ impl<'s> QueryExecutor<'s> {
                     fields,
                     on_conflict,
                 } => {
-                    let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+                    if !idx_cache.contains_key(table) {
+                        let defs =
+                            index::load_index_definitions(self.storage, &self.ns, &self.db, table)?;
+                        idx_cache.insert(table.clone(), defs);
+                    }
+                    let coll = Collection::new(self.storage, &self.ns, &self.db, table)
+                        .with_indexes(idx_cache[table].clone());
                     let mut doc = Document::new(RecordId::generate(table));
                     for (name, lit) in fields {
                         doc.set(name, lit.to_value());
@@ -724,9 +772,90 @@ impl<'s> QueryExecutor<'s> {
     }
 
     fn exec_delete(&self, table: &str, id: &str) -> Result<QueryResult> {
-        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        // Catalog-aware so index entries are removed alongside the document.
+        let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
         let existed = coll.delete(id)?;
         Ok(QueryResult::Deleted { existed })
+    }
+
+    // -------------------------------------------------------------------
+    // Index DDL
+    // -------------------------------------------------------------------
+
+    /// `DEFINE INDEX`: register an index in the catalog and backfill entries
+    /// for all existing documents, atomically. For a unique index, the
+    /// backfill is aborted (and nothing persisted) if existing rows already
+    /// hold duplicate values.
+    fn exec_define_index(
+        &self,
+        name: &str,
+        table: &str,
+        fields: &[String],
+        unique: bool,
+    ) -> Result<QueryResult> {
+        let Some(field) = fields.first().cloned() else {
+            return Err(dllb_core::Error::Query(
+                "DEFINE INDEX requires at least one field".into(),
+            ));
+        };
+        let def = IndexDefinition {
+            name: name.to_string(),
+            fields: fields.to_vec(),
+            unique,
+        };
+
+        // Scan existing documents to backfill entries (and validate uniqueness
+        // up front so a failed constraint persists nothing).
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        let docs = coll.scan_all()?;
+
+        let mut seen: HashSet<Vec<u8>> = HashSet::new();
+        let mut entry_puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for doc in &docs {
+            if let Some(value) = doc.fields.get(&field)
+                && !value.is_none()
+                && unique
+            {
+                let encoded = index::encode_index_value(value)?;
+                if !seen.insert(encoded) {
+                    return Err(dllb_core::Error::Schema(format!(
+                        "cannot create unique index '{name}': field '{field}' has duplicate values"
+                    )));
+                }
+            }
+            let entries = index::build_index_entries(
+                doc,
+                &self.ns,
+                &self.db,
+                table,
+                std::slice::from_ref(&def),
+            )?;
+            entry_puts.extend(entries);
+        }
+
+        // Persist the catalog definition plus all backfilled entries in one
+        // atomic write.
+        let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
+        let mut puts: Vec<(&[u8], &[u8])> = Vec::with_capacity(1 + entry_puts.len());
+        puts.push((def_key.as_slice(), def_bytes.as_slice()));
+        for (k, v) in &entry_puts {
+            puts.push((k.as_slice(), v.as_slice()));
+        }
+        self.storage.write_batch(&puts, &[])?;
+
+        Ok(QueryResult::Ok)
+    }
+
+    /// `REMOVE INDEX`: delete the catalog definition and every index entry in
+    /// one atomic write. Subsequent queries fall back to scans.
+    fn exec_remove_index(&self, name: &str, table: &str) -> Result<QueryResult> {
+        let def_key = key::index_catalog_key(&self.ns, &self.db, table, name);
+        let entry_prefix = key::index_prefix(&self.ns, &self.db, table, name);
+        let mut deletes: Vec<Vec<u8>> = self.storage.scan_prefix_keys(&entry_prefix)?;
+        deletes.push(def_key);
+        let del_refs: Vec<&[u8]> = deletes.iter().map(|k| k.as_slice()).collect();
+        self.storage.write_batch(&[], &del_refs)?;
+        Ok(QueryResult::Ok)
     }
 
     fn exec_relate(
@@ -758,6 +887,65 @@ fn algo_str(algo: &crate::ast::CommunityAlgorithm) -> &'static str {
     match algo {
         crate::ast::CommunityAlgorithm::Louvain => "louvain",
         crate::ast::CommunityAlgorithm::LabelPropagation => "lp",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index planning
+// ---------------------------------------------------------------------------
+
+/// A chosen secondary-index access path for a `WHERE` clause.
+struct IndexPlan {
+    /// Name of the index to probe.
+    index_name: String,
+    /// The exact value to look up.
+    value: Value,
+    /// `true` when the index lookup alone fully satisfies the predicate (so a
+    /// `COUNT` may use the candidate count directly). `false` when the clause
+    /// has additional conjuncts that must still be applied to the candidates.
+    covers: bool,
+}
+
+/// Choose a secondary index to accelerate `clause`, if one applies.
+///
+/// Matches an equality predicate (`field = literal`) whose field is the
+/// leading field of some index. For an `AND`, an indexed equality on either
+/// side is used to narrow candidates while the full clause is re-applied as a
+/// residual filter (so `covers` is `false`). Ranges, `IS NONE`, and
+/// non-encodable values (arrays, `NONE`) yield no plan and keep the scan path.
+fn plan_index_lookup(indexes: &[IndexDefinition], clause: &WhereClause) -> Option<IndexPlan> {
+    if indexes.is_empty() {
+        return None;
+    }
+    match clause {
+        WhereClause::Cmp {
+            field,
+            op: CmpOp::Eq,
+            value,
+        } => {
+            let v = value.to_value();
+            // Only scalar, index-encodable values can probe an index.
+            if matches!(v, Value::Array(_) | Value::None) {
+                return None;
+            }
+            let idx = indexes
+                .iter()
+                .find(|i| i.fields.first().is_some_and(|f| f == field))?;
+            Some(IndexPlan {
+                index_name: idx.name.clone(),
+                value: v,
+                covers: true,
+            })
+        }
+        WhereClause::And(left, right) => {
+            // Narrow on an indexed equality from either side; the full clause
+            // is still applied to the candidates, so it does not fully cover.
+            let mut plan =
+                plan_index_lookup(indexes, left).or_else(|| plan_index_lookup(indexes, right))?;
+            plan.covers = false;
+            Some(plan)
+        }
+        _ => None,
     }
 }
 

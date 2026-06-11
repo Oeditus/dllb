@@ -303,6 +303,72 @@ fn update_maintains_index_entries() {
 }
 
 // -------------------------------------------------------------------
+// Index catalog persistence
+// -------------------------------------------------------------------
+
+#[test]
+fn catalog_save_load_remove_roundtrip() {
+    use dllb_document::index::{
+        load_index_definitions, remove_index_definition, save_index_definition,
+    };
+
+    let (_dir, storage) = temp_storage();
+
+    let by_age = IndexDefinition {
+        name: "by_age".into(),
+        fields: vec!["age".into()],
+        unique: false,
+    };
+    let by_email = IndexDefinition {
+        name: "by_email".into(),
+        fields: vec!["email".into()],
+        unique: true,
+    };
+    save_index_definition(&storage, "ns", "db", "user", &by_age).unwrap();
+    save_index_definition(&storage, "ns", "db", "user", &by_email).unwrap();
+
+    let mut defs = load_index_definitions(&storage, "ns", "db", "user").unwrap();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(defs, vec![by_age.clone(), by_email.clone()]);
+
+    // Removing one leaves the other; removing a missing one reports false.
+    assert!(remove_index_definition(&storage, "ns", "db", "user", "by_email").unwrap());
+    assert!(!remove_index_definition(&storage, "ns", "db", "user", "by_email").unwrap());
+    let defs = load_index_definitions(&storage, "ns", "db", "user").unwrap();
+    assert_eq!(defs, vec![by_age]);
+}
+
+#[test]
+fn collection_load_attaches_catalog_indexes() {
+    use dllb_document::index::save_index_definition;
+
+    let (_dir, storage) = temp_storage();
+    save_index_definition(
+        &storage,
+        "ns",
+        "db",
+        "user",
+        &IndexDefinition {
+            name: "by_age".into(),
+            fields: vec!["age".into()],
+            unique: false,
+        },
+    )
+    .unwrap();
+
+    // A catalog-loaded collection sees the index and maintains it on write.
+    let c = Collection::load(&storage, "ns", "db", "user").unwrap();
+    assert_eq!(c.indexes().len(), 1);
+    c.create(make_doc("alice", "Alice", 30)).unwrap();
+    c.create(make_doc("bob", "Bob", 30)).unwrap();
+
+    let ids = c.find_ids_by_index("by_age", &Value::Int(30)).unwrap();
+    assert_eq!(ids.len(), 2);
+    let docs = c.find_by_index("by_age", &Value::Int(30)).unwrap();
+    assert_eq!(docs.len(), 2);
+}
+
+// -------------------------------------------------------------------
 // Cross-table isolation
 // -------------------------------------------------------------------
 

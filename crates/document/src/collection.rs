@@ -46,6 +46,24 @@ impl<'s> Collection<'s> {
         }
     }
 
+    /// Create a collection with its registered indexes loaded from the
+    /// persisted catalog.
+    ///
+    /// Use this on every read and write path that must respect secondary
+    /// indexes: it ensures index entries are maintained on writes and that
+    /// the planner can see available indexes on reads.
+    pub fn load(storage: &'s DllbStorage, ns: &str, db: &str, table: &str) -> Result<Self> {
+        let indexes = index::load_index_definitions(storage, ns, db, table)?;
+        Ok(Self {
+            storage,
+            ns: ns.into(),
+            db: db.into(),
+            table: table.into(),
+            schema: None,
+            indexes,
+        })
+    }
+
     /// Attach a schema for schemafull validation.
     pub fn with_schema(mut self, schema: TableDefinition) -> Self {
         self.schema = Some(schema);
@@ -56,6 +74,20 @@ impl<'s> Collection<'s> {
     pub fn with_index(mut self, index: IndexDefinition) -> Self {
         self.indexes.push(index);
         self
+    }
+
+    /// Replace the registered indexes with the given set.
+    ///
+    /// Useful when the caller has already loaded the catalog once and wants to
+    /// reuse it across many collection instances (e.g. batch ingestion).
+    pub fn with_indexes(mut self, indexes: Vec<IndexDefinition>) -> Self {
+        self.indexes = indexes;
+        self
+    }
+
+    /// The indexes currently registered on this collection.
+    pub fn indexes(&self) -> &[IndexDefinition] {
+        &self.indexes
     }
 
     // -------------------------------------------------------------------
@@ -430,20 +462,22 @@ impl<'s> Collection<'s> {
 
     /// Find documents by an index value.
     pub fn find_by_index(&self, index_name: &str, value: &Value) -> Result<Vec<Document>> {
-        let ids = index::find_by_index(
+        let ids = self.find_ids_by_index(index_name, value)?;
+        self.get_many(&ids)
+    }
+
+    /// Find the record IDs matching an index value, without fetching documents.
+    ///
+    /// This is the cheap path for a covered `COUNT`: the count is simply the
+    /// number of returned IDs, so no document bodies need to be read.
+    pub fn find_ids_by_index(&self, index_name: &str, value: &Value) -> Result<Vec<String>> {
+        index::find_by_index(
             self.storage,
             &self.ns,
             &self.db,
             &self.table,
             index_name,
             value,
-        )?;
-        let mut docs = Vec::new();
-        for id in ids {
-            if let Some(doc) = self.get(&id)? {
-                docs.push(doc);
-            }
-        }
-        Ok(docs)
+        )
     }
 }

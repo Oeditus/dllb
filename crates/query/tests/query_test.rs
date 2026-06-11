@@ -1254,3 +1254,161 @@ fn boolean_and_float_values() {
         _ => panic!("expected Rows"),
     }
 }
+
+// -------------------------------------------------------------------
+// DEFINE / REMOVE INDEX and index-accelerated filtering
+// -------------------------------------------------------------------
+
+/// Count the rows in a `QueryResult::Rows`.
+fn row_count(result: QueryResult) -> usize {
+    match result {
+        QueryResult::Rows(rows) => rows.len(),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+}
+
+fn count_value(result: QueryResult) -> usize {
+    match result {
+        QueryResult::Count { count } => count,
+        other => panic!("expected Count, got {other:?}"),
+    }
+}
+
+#[test]
+fn define_index_backfills_then_select_eq_is_correct() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    // Rows exist *before* the index is defined, so DEFINE must backfill.
+    e.run("CREATE user:a SET name = 'A', age = 30;").unwrap();
+    e.run("CREATE user:b SET name = 'B', age = 30;").unwrap();
+    e.run("CREATE user:c SET name = 'C', age = 40;").unwrap();
+
+    let (def, _) = e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+    assert!(matches!(def, QueryResult::Ok));
+
+    // Indexed equality returns exactly the matching rows.
+    let (rows, _) = e.run("SELECT * FROM user WHERE age = 30;").unwrap();
+    assert_eq!(row_count(rows), 2);
+
+    // And COUNT over the indexed equality matches.
+    let (cnt, _) = e.run("COUNT user WHERE age = 30;").unwrap();
+    assert_eq!(count_value(cnt), 2);
+}
+
+#[test]
+fn index_is_maintained_on_create_update_delete() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+
+    // CREATE after the index exists must populate the index.
+    e.run("CREATE user:a SET name = 'A', age = 30;").unwrap();
+    e.run("CREATE user:b SET name = 'B', age = 30;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        2
+    );
+
+    // UPDATE moves a row from age 30 to 40: both buckets must reflect it.
+    e.run("UPDATE user:a SET age = 40;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        1
+    );
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 40;").unwrap().0),
+        1
+    );
+    assert_eq!(
+        row_count(e.run("SELECT * FROM user WHERE age = 40;").unwrap().0),
+        1
+    );
+
+    // DELETE removes the row from the index.
+    e.run("DELETE user:b;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        0
+    );
+}
+
+#[test]
+fn indexed_equality_with_residual_and_filter() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30, tier = 'gold';").unwrap();
+    e.run("CREATE user:b SET age = 30, tier = 'silver';")
+        .unwrap();
+    e.run("CREATE user:c SET age = 40, tier = 'gold';").unwrap();
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+
+    // age = 30 narrows via the index; tier = 'gold' is the residual filter.
+    let (rows, _) = e
+        .run("SELECT * FROM user WHERE age = 30 AND tier = 'gold';")
+        .unwrap();
+    assert_eq!(row_count(rows), 1);
+    let (cnt, _) = e
+        .run("COUNT user WHERE age = 30 AND tier = 'gold';")
+        .unwrap();
+    assert_eq!(count_value(cnt), 1);
+}
+
+#[test]
+fn unique_index_rejects_duplicate_on_create() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("DEFINE INDEX uniq_email ON user FIELDS email UNIQUE;")
+        .unwrap();
+    e.run("CREATE user:a SET email = 'x@y.z';").unwrap();
+    // Second insert with the same email violates the unique index.
+    assert!(e.run("CREATE user:b SET email = 'x@y.z';").is_err());
+}
+
+#[test]
+fn define_unique_index_rejects_existing_duplicates() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET email = 'x@y.z';").unwrap();
+    e.run("CREATE user:b SET email = 'x@y.z';").unwrap();
+
+    // Defining a unique index over already-duplicate data must fail, and must
+    // not persist a partial catalog entry (a later SELECT still works).
+    assert!(
+        e.run("DEFINE INDEX uniq_email ON user FIELDS email UNIQUE;")
+            .is_err()
+    );
+    let (rows, _) = e.run("SELECT * FROM user WHERE email = 'x@y.z';").unwrap();
+    assert_eq!(row_count(rows), 2);
+}
+
+#[test]
+fn remove_index_falls_back_to_scan() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("CREATE user:a SET age = 30;").unwrap();
+    e.run("CREATE user:b SET age = 30;").unwrap();
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        2
+    );
+
+    let (removed, _) = e.run("REMOVE INDEX by_age ON user;").unwrap();
+    assert!(matches!(removed, QueryResult::Ok));
+
+    // After removal the same query still returns correct results via scan.
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        2
+    );
+    assert_eq!(
+        row_count(e.run("SELECT * FROM user WHERE age = 30;").unwrap().0),
+        2
+    );
+}

@@ -277,6 +277,46 @@ pub fn metadata_key(ns: &str, db: &str, table: &str) -> Vec<u8> {
         .build()
 }
 
+/// Build an index-catalog key: `ns\0db\0table\0!idx\0<index_name>`.
+///
+/// Lives in the metadata keyspace under an `idx` sub-namespace so the bare
+/// [`metadata_key`] and future metadata entries never collide with it.
+pub fn index_catalog_key(ns: &str, db: &str, table: &str, index_name: &str) -> Vec<u8> {
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::METADATA)
+        .segment(b"idx")
+        .raw(index_name.as_bytes())
+        .build()
+}
+
+/// Prefix for all index-catalog entries of a table: `ns\0db\0table\0!idx\0`.
+pub fn index_catalog_prefix(ns: &str, db: &str, table: &str) -> Vec<u8> {
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::METADATA)
+        .segment(b"idx")
+        .build()
+}
+
+/// Prefix for all index *entries* of a single index:
+/// `ns\0db\0table\0+<index_name>\0`.
+///
+/// Used to bulk-delete every entry of an index when it is removed.
+pub fn index_prefix(ns: &str, db: &str, table: &str, index_name: &str) -> Vec<u8> {
+    KeyBuilder::new()
+        .namespace(ns)
+        .database(db)
+        .table(table)
+        .tag(tag::INDEX)
+        .segment(index_name.as_bytes())
+        .build()
+}
+
 // ---------------------------------------------------------------------------
 // Prefix helpers
 // ---------------------------------------------------------------------------
@@ -428,6 +468,34 @@ mod tests {
     fn validate_segment_rejects_null() {
         assert!(validate_segment("hello").is_ok());
         assert!(validate_segment("hel\0lo").is_err());
+    }
+
+    #[test]
+    fn index_catalog_key_under_catalog_prefix() {
+        let cat_prefix = index_catalog_prefix("ns", "db", "user");
+        let key = index_catalog_key("ns", "db", "user", "by_age");
+        // The catalog key starts with the catalog prefix, and the index name
+        // is exactly the suffix after it -- so load can recover the name and a
+        // catalog scan returns only catalog entries.
+        assert!(key.starts_with(&cat_prefix));
+        assert_eq!(&key[cat_prefix.len()..], b"by_age");
+        // The catalog prefix is strictly longer/more specific than the bare
+        // metadata key (it adds the `idx` sub-namespace).
+        assert!(cat_prefix.len() > metadata_key("ns", "db", "user").len());
+    }
+
+    #[test]
+    fn index_prefix_matches_index_entry_region() {
+        // The index-entry prefix is the INDEX-tagged region for one index name.
+        let prefix = index_prefix("ns", "db", "user", "by_age");
+        let expected = KeyBuilder::new()
+            .namespace("ns")
+            .database("db")
+            .table("user")
+            .tag(tag::INDEX)
+            .segment(b"by_age")
+            .build();
+        assert_eq!(prefix, expected);
     }
 
     #[test]

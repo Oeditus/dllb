@@ -7,6 +7,8 @@
 //! Field values are encoded to bytes that preserve sort order so that
 //! range scans over index entries return results in field-value order.
 
+use serde::{Deserialize, Serialize};
+
 use dllb_core::{Error, Result, Value};
 use dllb_storage::db::DllbStorage;
 use dllb_storage::key;
@@ -14,7 +16,7 @@ use dllb_storage::key;
 use crate::Document;
 
 /// Definition of a secondary index on a collection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexDefinition {
     /// Index name (used in the KV key).
     pub name: String,
@@ -145,6 +147,77 @@ pub fn find_by_index(
         }
     }
     Ok(ids)
+}
+
+// ---------------------------------------------------------------------------
+// Index catalog persistence
+// ---------------------------------------------------------------------------
+//
+// Index definitions are persisted in the metadata keyspace so that they
+// survive restarts and are visible to every connection. Each definition is
+// a MessagePack-serialized `IndexDefinition` stored under
+// `ns\0db\0table\0!idx\0<index_name>`.
+
+/// Build the catalog `(key, value)` pair for an index definition.
+///
+/// Exposed so callers can include catalog persistence in a larger atomic
+/// `write_batch` (e.g. `DEFINE INDEX` writing the definition together with
+/// all backfilled entries in one transaction).
+pub fn index_definition_kv(
+    ns: &str,
+    db: &str,
+    table: &str,
+    def: &IndexDefinition,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let key = key::index_catalog_key(ns, db, table, &def.name);
+    let bytes = rmp_serde::to_vec(def).map_err(|e| Error::Serialization(e.to_string()))?;
+    Ok((key, bytes))
+}
+
+/// Persist (create or overwrite) an index definition in the catalog.
+pub fn save_index_definition(
+    storage: &DllbStorage,
+    ns: &str,
+    db: &str,
+    table: &str,
+    def: &IndexDefinition,
+) -> Result<()> {
+    let (key, bytes) = index_definition_kv(ns, db, table, def)?;
+    storage.put(&key, &bytes)
+}
+
+/// Remove an index definition from the catalog. Returns `true` if it existed.
+pub fn remove_index_definition(
+    storage: &DllbStorage,
+    ns: &str,
+    db: &str,
+    table: &str,
+    index_name: &str,
+) -> Result<bool> {
+    let key = key::index_catalog_key(ns, db, table, index_name);
+    let existed = storage.contains(&key)?;
+    if existed {
+        storage.delete(&key)?;
+    }
+    Ok(existed)
+}
+
+/// Load all index definitions registered for a table.
+pub fn load_index_definitions(
+    storage: &DllbStorage,
+    ns: &str,
+    db: &str,
+    table: &str,
+) -> Result<Vec<IndexDefinition>> {
+    let prefix = key::index_catalog_prefix(ns, db, table);
+    let entries = storage.prefix_scan(&prefix)?;
+    let mut defs = Vec::with_capacity(entries.len());
+    for (_k, v) in entries {
+        let def: IndexDefinition =
+            rmp_serde::from_slice(&v).map_err(|e| Error::Serialization(e.to_string()))?;
+        defs.push(def);
+    }
+    Ok(defs)
 }
 
 /// Check if a unique index value already exists for a different record.

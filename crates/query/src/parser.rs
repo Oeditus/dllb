@@ -35,9 +35,57 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         Some(Token::Update) => parse_update(tokens, pos),
         Some(Token::Count) => parse_count(tokens, pos),
         Some(Token::Graph) => parse_graph(tokens, pos),
+        // DDL keywords are contextual idents (not reserved tokens) so they
+        // never shadow table/field names.
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("DEFINE") => {
+            parse_define_index(tokens, pos)
+        }
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("REMOVE") => {
+            parse_remove_index(tokens, pos)
+        }
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
     }
+}
+
+// -----------------------------------------------------------------------
+// DEFINE INDEX <name> ON [TABLE] <table> FIELDS <field>[, ...] [UNIQUE]
+// REMOVE INDEX <name> ON [TABLE] <table>
+// -----------------------------------------------------------------------
+
+fn parse_define_index(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "DEFINE")?;
+    expect_keyword(tokens, pos, "INDEX")?;
+    let name = expect_ident(tokens, pos)?;
+    expect(tokens, pos, &Token::On)?;
+    consume_keyword(tokens, pos, "TABLE"); // optional `ON TABLE`
+    let table = expect_ident(tokens, pos)?;
+    expect_keyword(tokens, pos, "FIELDS")?;
+
+    let mut fields = vec![expect_ident(tokens, pos)?];
+    while matches!(tokens.get(*pos), Some(Token::Comma)) {
+        *pos += 1;
+        fields.push(expect_ident(tokens, pos)?);
+    }
+
+    let unique = consume_keyword(tokens, pos, "UNIQUE");
+
+    Ok(Statement::DefineIndex {
+        name,
+        table,
+        fields,
+        unique,
+    })
+}
+
+fn parse_remove_index(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "REMOVE")?;
+    expect_keyword(tokens, pos, "INDEX")?;
+    let name = expect_ident(tokens, pos)?;
+    expect(tokens, pos, &Token::On)?;
+    consume_keyword(tokens, pos, "TABLE"); // optional `ON TABLE`
+    let table = expect_ident(tokens, pos)?;
+    Ok(Statement::RemoveIndex { name, table })
 }
 
 // -----------------------------------------------------------------------
@@ -620,6 +668,34 @@ fn expect_ident(tokens: &[Token], pos: &mut usize) -> Result<String> {
     }
 }
 
+/// Expect a contextual keyword (a case-insensitive identifier), consuming it.
+///
+/// Used for DDL keywords that are intentionally *not* reserved tokens, so that
+/// words like `INDEX` or `FIELDS` remain usable as ordinary identifiers.
+fn expect_keyword(tokens: &[Token], pos: &mut usize, kw: &str) -> Result<()> {
+    match tokens.get(*pos) {
+        Some(Token::Ident(s)) if s.eq_ignore_ascii_case(kw) => {
+            *pos += 1;
+            Ok(())
+        }
+        Some(t) => Err(Error::Query(format!("expected keyword {kw}, got {t:?}"))),
+        None => Err(Error::Query(format!(
+            "unexpected end of input, expected keyword {kw}"
+        ))),
+    }
+}
+
+/// Consume a contextual keyword if present, returning whether it was consumed.
+fn consume_keyword(tokens: &[Token], pos: &mut usize, kw: &str) -> bool {
+    if let Some(Token::Ident(s)) = tokens.get(*pos)
+        && s.eq_ignore_ascii_case(kw)
+    {
+        *pos += 1;
+        return true;
+    }
+    false
+}
+
 /// Parse an optional `OUTCOME JSON|TOON|CSV` clause.
 fn parse_outcome(tokens: &[Token], pos: &mut usize) -> Result<OutcomeFormat> {
     if !matches!(tokens.get(*pos), Some(Token::Outcome)) {
@@ -1095,5 +1171,78 @@ mod tests {
     #[test]
     fn parse_graph_missing_communities_errors() {
         assert!(parse("GRAPH calls").is_err());
+    }
+
+    // -- DEFINE / REMOVE INDEX tests -----------------------------------------
+
+    #[test]
+    fn parse_define_index_basic() {
+        match stmt("DEFINE INDEX by_age ON user FIELDS age") {
+            Statement::DefineIndex {
+                name,
+                table,
+                fields,
+                unique,
+            } => {
+                assert_eq!(name, "by_age");
+                assert_eq!(table, "user");
+                assert_eq!(fields, vec!["age"]);
+                assert!(!unique);
+            }
+            _ => panic!("expected DefineIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_index_on_table_unique_multi_field() {
+        match stmt("DEFINE INDEX idx ON TABLE user FIELDS email, tenant UNIQUE;") {
+            Statement::DefineIndex {
+                name,
+                table,
+                fields,
+                unique,
+            } => {
+                assert_eq!(name, "idx");
+                assert_eq!(table, "user");
+                assert_eq!(fields, vec!["email", "tenant"]);
+                assert!(unique);
+            }
+            _ => panic!("expected DefineIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_index_case_insensitive_keywords() {
+        // Contextual keywords are case-insensitive.
+        assert!(matches!(
+            stmt("define index by_age on user fields age unique"),
+            Statement::DefineIndex { unique: true, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_remove_index() {
+        match stmt("REMOVE INDEX by_age ON user") {
+            Statement::RemoveIndex { name, table } => {
+                assert_eq!(name, "by_age");
+                assert_eq!(table, "user");
+            }
+            _ => panic!("expected RemoveIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_index_requires_fields() {
+        assert!(parse("DEFINE INDEX by_age ON user").is_err());
+    }
+
+    #[test]
+    fn keywords_remain_usable_as_identifiers() {
+        // `index`, `fields`, `unique` are not reserved, so a column named
+        // `unique` still parses as an ordinary WHERE field.
+        assert!(matches!(
+            stmt("SELECT * FROM user WHERE unique = 1"),
+            Statement::Select { .. }
+        ));
     }
 }

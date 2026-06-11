@@ -94,6 +94,19 @@ pub enum Statement {
         /// Edge table (edge type) to compute connected components over.
         table: String,
     },
+    /// `DEFINE INDEX <name> ON [TABLE] <table> FIELDS <field>[, ...] [UNIQUE]`
+    ///
+    /// Registers a secondary index in the catalog and backfills entries for
+    /// existing documents. Only the first field is currently indexed.
+    DefineIndex {
+        name: String,
+        table: String,
+        fields: Vec<String>,
+        unique: bool,
+    },
+    /// `REMOVE INDEX <name> ON [TABLE] <table>` -- drop an index and all its
+    /// entries.
+    RemoveIndex { name: String, table: String },
 }
 
 /// Which fields to return in a SELECT.
