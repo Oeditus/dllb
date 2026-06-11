@@ -50,4 +50,33 @@ pub trait KvStore: Send + Sync {
         let end = crate::key::prefix_end(prefix);
         self.scan(prefix, &end)
     }
+
+    /// Count the entries sharing the given `prefix`.
+    ///
+    /// The default implementation materializes the range; backends should
+    /// override to count without copying keys or values out of the engine.
+    fn count_prefix(&self, prefix: &[u8]) -> Result<usize> {
+        Ok(self.prefix_scan(prefix)?.len())
+    }
+
+    /// Scan only the keys sharing the given `prefix`, skipping values.
+    ///
+    /// The default implementation drops the values after a full scan;
+    /// backends should override to avoid copying values entirely.
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .prefix_scan(prefix)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
+    /// Resolve multiple point lookups, returning one entry per input key in
+    /// the same order (`None` for absent keys).
+    ///
+    /// The default implementation issues one `get` per key; backends should
+    /// override to share a single read transaction across all lookups.
+    fn multi_get(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        keys.iter().map(|k| self.get(k)).collect()
+    }
 }

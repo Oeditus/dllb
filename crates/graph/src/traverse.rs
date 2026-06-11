@@ -135,6 +135,67 @@ impl<'s> Traversal<'s> {
     }
 
     // -------------------------------------------------------------------
+    // Neighbor-only single-hop (IDs without edge properties)
+    // -------------------------------------------------------------------
+    //
+    // These return only the adjacent vertex IDs, parsed directly from the
+    // sorted keys. They never deserialize edge properties and -- crucially
+    // for the incoming direction -- never issue the per-edge point lookup
+    // that `scan_incoming` needs to populate `Edge::properties`. Prefer them
+    // for pure reachability traversals (the dominant query-engine path),
+    // where edge properties are irrelevant.
+
+    /// All outgoing neighbor vertex IDs from `src` (any edge type).
+    pub fn outgoing_neighbors(&self, src: &str) -> Result<Vec<String>> {
+        let prefix =
+            key::vertex_outgoing_prefix(&self.store.ns, &self.store.db, &self.store.table, src);
+        self.scan_neighbors(&prefix)
+    }
+
+    /// Outgoing neighbor vertex IDs of a specific edge type from `src`.
+    pub fn outgoing_neighbors_typed(&self, src: &str, edge_type: &str) -> Result<Vec<String>> {
+        let prefix = key::vertex_outgoing_typed_prefix(
+            &self.store.ns,
+            &self.store.db,
+            &self.store.table,
+            src,
+            edge_type,
+        );
+        self.scan_neighbors(&prefix)
+    }
+
+    /// All incoming neighbor vertex IDs to `dst` (any edge type).
+    pub fn incoming_neighbors(&self, dst: &str) -> Result<Vec<String>> {
+        let prefix =
+            key::vertex_incoming_prefix(&self.store.ns, &self.store.db, &self.store.table, dst);
+        self.scan_neighbors(&prefix)
+    }
+
+    /// Incoming neighbor vertex IDs of a specific edge type to `dst`.
+    pub fn incoming_neighbors_typed(&self, dst: &str, edge_type: &str) -> Result<Vec<String>> {
+        let prefix = key::vertex_incoming_typed_prefix(
+            &self.store.ns,
+            &self.store.db,
+            &self.store.table,
+            dst,
+            edge_type,
+        );
+        self.scan_neighbors(&prefix)
+    }
+
+    /// Shared key-only scan: returns the "other vertex" of every edge under
+    /// `prefix`, reading keys only (no value deserialization, no point gets).
+    fn scan_neighbors(&self, prefix: &[u8]) -> Result<Vec<String>> {
+        let keys = self.store.storage.scan_prefix_keys(prefix)?;
+        let mut neighbors = Vec::with_capacity(keys.len());
+        for k in keys {
+            let parts = key::parse_key(&k)?;
+            neighbors.push(parse_other_vertex(parts.remainder)?);
+        }
+        Ok(neighbors)
+    }
+
+    // -------------------------------------------------------------------
     // Multi-hop walk
     // -------------------------------------------------------------------
 
@@ -209,6 +270,23 @@ fn parse_directed_remainder(remainder: &[u8], _is_outgoing: bool) -> Result<(Str
         .to_string();
 
     Ok((edge_type, other_vertex))
+}
+
+/// Extract only the "other vertex" (third segment) from a graph edge key
+/// remainder of the form `vertex_id\0<dir><edge_type>\0other_vertex`.
+///
+/// Cheaper than [`parse_directed_remainder`] when the edge type is not needed:
+/// it skips the first two segments and never allocates the edge-type string.
+fn parse_other_vertex(remainder: &[u8]) -> Result<String> {
+    let mut parts = remainder.splitn(3, |&b| b == SEPARATOR);
+    let _vertex_id = parts.next();
+    let _dir_and_type = parts.next();
+    let other = parts
+        .next()
+        .ok_or_else(|| Error::Storage("malformed graph edge key: missing other vertex".into()))?;
+    std::str::from_utf8(other)
+        .map(|s| s.to_string())
+        .map_err(|e| Error::Storage(e.to_string()))
 }
 
 fn deserialize_props(bytes: &[u8]) -> Result<BTreeMap<String, Value>> {

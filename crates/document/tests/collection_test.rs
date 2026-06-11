@@ -134,6 +134,48 @@ fn scan_all_and_count() {
     assert_eq!(c.count().unwrap(), 3);
 }
 
+#[test]
+fn scan_ids_returns_ids_only_in_key_order() {
+    let (_dir, storage) = temp_storage();
+    let c = coll(&storage);
+
+    c.create(make_doc("carol", "C", 3)).unwrap();
+    c.create(make_doc("alice", "A", 1)).unwrap();
+    c.create(make_doc("bob", "B", 2)).unwrap();
+
+    // IDs come back in sorted key order, without touching document bodies.
+    let ids = c.scan_ids().unwrap();
+    assert_eq!(ids, vec!["alice", "bob", "carol"]);
+}
+
+#[test]
+fn get_many_preserves_order_and_skips_missing() {
+    let (_dir, storage) = temp_storage();
+    let c = coll(&storage);
+
+    c.create(make_doc("alice", "Alice", 30)).unwrap();
+    c.create(make_doc("carol", "Carol", 40)).unwrap();
+
+    // "bob" does not exist and must be skipped while order is preserved.
+    let ids = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    let docs = c.get_many(&ids).unwrap();
+    let names: Vec<&Value> = docs.iter().filter_map(|d| d.get("name")).collect();
+    assert_eq!(
+        names,
+        vec![
+            &Value::String("Alice".into()),
+            &Value::String("Carol".into())
+        ]
+    );
+}
+
+#[test]
+fn get_many_empty_input_is_empty() {
+    let (_dir, storage) = temp_storage();
+    let c = coll(&storage);
+    assert!(c.get_many(&[]).unwrap().is_empty());
+}
+
 // -------------------------------------------------------------------
 // Schema enforcement
 // -------------------------------------------------------------------

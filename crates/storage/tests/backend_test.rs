@@ -199,3 +199,66 @@ fn dllb_storage_graph_edges_sorted() {
     let knows_results = storage.prefix_scan(&knows_prefix).unwrap();
     assert_eq!(knows_results.len(), 2);
 }
+
+// -----------------------------------------------------------------------
+// count_prefix / scan_prefix_keys / multi_get
+// -----------------------------------------------------------------------
+
+#[test]
+fn count_prefix_matches_prefix_scan_len() {
+    let (_dir, storage) = temp_storage();
+
+    for id in ["a", "b", "c", "d"] {
+        let k = key::document_key("ns", "db", "tbl", id);
+        storage.put(&k, b"payload").unwrap();
+    }
+    // A document in a different table must not be counted.
+    let other = key::document_key("ns", "db", "other", "x");
+    storage.put(&other, b"x").unwrap();
+
+    let prefix = key::table_prefix("ns", "db", "tbl", key::tag::DOCUMENT);
+    assert_eq!(storage.count_prefix(&prefix).unwrap(), 4);
+    // Consistent with the materializing path.
+    assert_eq!(
+        storage.count_prefix(&prefix).unwrap(),
+        storage.prefix_scan(&prefix).unwrap().len()
+    );
+}
+
+#[test]
+fn count_prefix_empty_is_zero() {
+    let (_dir, storage) = temp_storage();
+    let prefix = key::table_prefix("ns", "db", "empty", key::tag::DOCUMENT);
+    assert_eq!(storage.count_prefix(&prefix).unwrap(), 0);
+}
+
+#[test]
+fn scan_prefix_keys_returns_keys_only_in_order() {
+    let (_dir, storage) = temp_storage();
+
+    let k1 = key::document_key("ns", "db", "tbl", "alice");
+    let k2 = key::document_key("ns", "db", "tbl", "bob");
+    storage.put(&k1, b"alice-data").unwrap();
+    storage.put(&k2, b"bob-data").unwrap();
+
+    let prefix = key::table_prefix("ns", "db", "tbl", key::tag::DOCUMENT);
+    let keys = storage.scan_prefix_keys(&prefix).unwrap();
+    // Keys come back in sorted key order and exclude values.
+    assert_eq!(keys, vec![k1, k2]);
+}
+
+#[test]
+fn multi_get_preserves_order_and_marks_absent() {
+    let (_dir, storage) = temp_storage();
+
+    let ka = key::document_key("ns", "db", "tbl", "a");
+    let kc = key::document_key("ns", "db", "tbl", "c");
+    storage.put(&ka, b"A").unwrap();
+    storage.put(&kc, b"C").unwrap();
+
+    let kb = key::document_key("ns", "db", "tbl", "b"); // never written
+    let got = storage
+        .multi_get(&[ka.as_slice(), kb.as_slice(), kc.as_slice()])
+        .unwrap();
+    assert_eq!(got, vec![Some(b"A".to_vec()), None, Some(b"C".to_vec())]);
+}

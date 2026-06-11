@@ -185,6 +185,81 @@ fn delete_removes_both_directions() {
 }
 
 // -------------------------------------------------------------------
+// Traversal: neighbor-only (IDs without edge properties)
+// -------------------------------------------------------------------
+
+#[test]
+fn outgoing_neighbors_match_outgoing_dsts() {
+    let (_dir, storage) = temp_storage();
+    let store = es(&storage);
+
+    store.relate(&Edge::new("alice", "knows", "bob")).unwrap();
+    store.relate(&Edge::new("alice", "knows", "carol")).unwrap();
+    store.relate(&Edge::new("alice", "likes", "dave")).unwrap();
+
+    let t = Traversal::new(&store);
+    // All edge types.
+    let mut all = t.outgoing_neighbors("alice").unwrap();
+    all.sort();
+    assert_eq!(all, vec!["bob", "carol", "dave"]);
+
+    // Typed.
+    let mut knows = t.outgoing_neighbors_typed("alice", "knows").unwrap();
+    knows.sort();
+    assert_eq!(knows, vec!["bob", "carol"]);
+}
+
+#[test]
+fn incoming_neighbors_match_incoming_srcs() {
+    let (_dir, storage) = temp_storage();
+    let store = es(&storage);
+
+    store.relate(&Edge::new("alice", "knows", "bob")).unwrap();
+    store.relate(&Edge::new("carol", "knows", "bob")).unwrap();
+    store.relate(&Edge::new("dave", "likes", "bob")).unwrap();
+
+    let t = Traversal::new(&store);
+    let mut all = t.incoming_neighbors("bob").unwrap();
+    all.sort();
+    assert_eq!(all, vec!["alice", "carol", "dave"]);
+
+    let mut knows = t.incoming_neighbors_typed("bob", "knows").unwrap();
+    knows.sort();
+    assert_eq!(knows, vec!["alice", "carol"]);
+}
+
+#[test]
+fn neighbors_empty_for_unknown_vertex() {
+    let (_dir, storage) = temp_storage();
+    let store = es(&storage);
+    let t = Traversal::new(&store);
+
+    assert!(t.outgoing_neighbors("nobody").unwrap().is_empty());
+    assert!(t.incoming_neighbors("nobody").unwrap().is_empty());
+}
+
+#[test]
+fn scan_all_edges_returns_outgoing_pairs_only() {
+    let (_dir, storage) = temp_storage();
+    let store = es(&storage);
+
+    store.relate(&Edge::new("a", "knows", "b")).unwrap();
+    store.relate(&Edge::new("b", "knows", "c")).unwrap();
+
+    // Key-only scan must yield exactly the outgoing (src, dst) pairs, never
+    // the incoming reverse pointers.
+    let mut edges = store.scan_all_edges().unwrap();
+    edges.sort();
+    assert_eq!(
+        edges,
+        vec![
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "c".to_string())
+        ]
+    );
+}
+
+// -------------------------------------------------------------------
 // Traversal: multi-hop walk
 // -------------------------------------------------------------------
 

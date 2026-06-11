@@ -1,6 +1,6 @@
 //! Query executor: maps parsed [`Statement`]s to concrete crate API calls.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
@@ -383,33 +383,33 @@ impl<'s> QueryExecutor<'s> {
     ) -> Result<QueryResult> {
         use crate::ast::TraversalDirection;
 
-        // Collect starting vertex IDs.
+        // Collect starting vertex IDs. For a whole-table source we only need
+        // the IDs, so scan keys (no document bodies are deserialized).
         let mut current_ids: Vec<String> = match from {
             FromTarget::Record(r) => vec![r.id.clone()],
             FromTarget::Table(t) => {
                 let coll = Collection::new(self.storage, &self.ns, &self.db, t);
-                coll.scan_all()?.into_iter().map(|d| d.id.id).collect()
+                coll.scan_ids()?
             }
         };
 
-        // Follow each hop in sequence.
+        // Follow each hop in sequence. Hops use neighbor-only scans (no edge
+        // properties are read), and destinations are deduplicated with a set
+        // plus an insertion-ordered vector -- O(1) amortized per neighbor
+        // instead of the previous O(n) `Vec::contains` scan per neighbor.
         for hop in &chain.hops {
             let es = EdgeStore::new(self.storage, &self.ns, &self.db, &hop.edge_type);
             let tv = Traversal::new(&es);
             let mut next_ids: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
 
             for id in &current_ids {
-                let edges = match hop.direction {
-                    TraversalDirection::Out => tv.outgoing_typed(id, &hop.edge_type)?,
-                    TraversalDirection::In => tv.incoming_typed(id, &hop.edge_type)?,
+                let neighbors = match hop.direction {
+                    TraversalDirection::Out => tv.outgoing_neighbors_typed(id, &hop.edge_type)?,
+                    TraversalDirection::In => tv.incoming_neighbors_typed(id, &hop.edge_type)?,
                 };
-                for edge in edges {
-                    let dest = match hop.direction {
-                        TraversalDirection::Out => edge.dst,
-                        TraversalDirection::In => edge.src,
-                    };
-                    // Deduplicate destinations.
-                    if !next_ids.contains(&dest) {
+                for dest in neighbors {
+                    if seen.insert(dest.clone()) {
                         next_ids.push(dest);
                     }
                 }
@@ -424,11 +424,12 @@ impl<'s> QueryExecutor<'s> {
         };
         let coll = Collection::new(self.storage, &self.ns, &self.db, final_table);
 
-        let mut rows: Vec<BTreeMap<String, Value>> = Vec::new();
-        for id in &current_ids {
-            let Some(doc) = coll.get(id)? else {
-                continue;
-            };
+        // Fetch all destination documents in a single read transaction
+        // (preserving traversal order; missing records are skipped).
+        let docs = coll.get_many(&current_ids)?;
+
+        let mut rows: Vec<BTreeMap<String, Value>> = Vec::with_capacity(docs.len());
+        for doc in docs {
             // Apply WHERE filter on the destination document.
             if let Some(clause) = filter
                 && !matches_where(&doc, clause)
@@ -581,7 +582,9 @@ impl<'s> QueryExecutor<'s> {
 
     fn exec_graph_components(&self, table: &str) -> Result<QueryResult> {
         let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
-        let edges = store.scan_all_outgoing()?;
+        // Connectivity ignores weights, so use the key-only edge scan that
+        // never deserializes edge properties.
+        let edges = store.scan_all_edges()?;
 
         let comps = connected_components(&edges);
 

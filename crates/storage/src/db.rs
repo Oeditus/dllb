@@ -90,6 +90,29 @@ impl DllbStorage {
         self.backend.prefix_scan(prefix)
     }
 
+    /// Count the entries sharing the given prefix without materializing them.
+    ///
+    /// Backs cheap `COUNT(*)`-style aggregations: the engine advances its
+    /// range cursor and never copies keys or values into user space.
+    pub fn count_prefix(&self, prefix: &[u8]) -> Result<usize> {
+        self.backend.count_prefix(prefix)
+    }
+
+    /// Scan only the keys sharing the given prefix, skipping value reads.
+    ///
+    /// Backs key-derived lookups (document ids, graph neighbor ids) where the
+    /// stored value is irrelevant, avoiding per-entry value copies.
+    pub fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        self.backend.scan_prefix_keys(prefix)
+    }
+
+    /// Resolve multiple keys in a single read transaction.
+    ///
+    /// Returns one entry per input key, in order (`None` for absent keys).
+    pub fn multi_get(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.backend.multi_get(keys)
+    }
+
     /// Check whether a key exists.
     pub fn contains(&self, key: &[u8]) -> Result<bool> {
         self.backend.contains(key)

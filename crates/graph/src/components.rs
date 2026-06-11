@@ -31,17 +31,17 @@ impl Components {
     }
 }
 
-/// Compute connected components from a weighted directed edge list.
+/// Compute connected components from a directed edge list.
 ///
-/// Edges are treated as undirected and weights are ignored. Both endpoints of
-/// every edge are registered, so isolated endpoints and self-loops each form
-/// their own singleton component.
-pub fn connected_components(edges: &[(String, String, f64)]) -> Components {
+/// Edges are treated as undirected and carry no weight (connectivity does not
+/// depend on weight). Both endpoints of every edge are registered, so isolated
+/// endpoints and self-loops each form their own singleton component.
+pub fn connected_components(edges: &[(String, String)]) -> Components {
     // Assign a dense integer index to each distinct node ID.
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut labels: Vec<String> = Vec::new();
 
-    for (src, dst, _weight) in edges {
+    for (src, dst) in edges {
         intern(src, &mut index, &mut labels);
         intern(dst, &mut index, &mut labels);
     }
@@ -57,7 +57,7 @@ pub fn connected_components(edges: &[(String, String, f64)]) -> Components {
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank: Vec<u8> = vec![0; n];
 
-    for (src, dst, _weight) in edges {
+    for (src, dst) in edges {
         let a = index[src.as_str()];
         let b = index[dst.as_str()];
         union(&mut parent, &mut rank, a, b);
@@ -124,8 +124,8 @@ fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
 mod tests {
     use super::*;
 
-    fn edge(a: &str, b: &str) -> (String, String, f64) {
-        (a.to_string(), b.to_string(), 1.0)
+    fn edge(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
     }
 
     #[test]

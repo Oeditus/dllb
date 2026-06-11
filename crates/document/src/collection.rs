@@ -242,11 +242,57 @@ impl<'s> Collection<'s> {
         Ok(docs)
     }
 
+    /// Scan only the record IDs in the collection.
+    ///
+    /// IDs are recovered directly from the keys, so document bodies are never
+    /// read or deserialized. Prefer this over [`scan_all`](Self::scan_all)
+    /// when only the identifiers are needed (e.g. graph-traversal seeds).
+    pub fn scan_ids(&self) -> Result<Vec<String>> {
+        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, key::tag::DOCUMENT);
+        let keys = self.storage.scan_prefix_keys(&prefix)?;
+        let mut ids = Vec::with_capacity(keys.len());
+        for k in keys {
+            let parts = key::parse_key(&k)?;
+            let id_str =
+                std::str::from_utf8(parts.remainder).map_err(|e| Error::Storage(e.to_string()))?;
+            ids.push(id_str.to_string());
+        }
+        Ok(ids)
+    }
+
     /// Count the number of documents in the collection.
+    ///
+    /// Counts entries directly in the storage engine without copying keys or
+    /// document bodies into memory.
     pub fn count(&self) -> Result<usize> {
         let prefix = key::table_prefix(&self.ns, &self.db, &self.table, key::tag::DOCUMENT);
-        let entries = self.storage.prefix_scan(&prefix)?;
-        Ok(entries.len())
+        self.storage.count_prefix(&prefix)
+    }
+
+    /// Resolve many documents by ID in a single storage read transaction.
+    ///
+    /// Returns the documents that exist, in the same order as `ids`; missing
+    /// IDs are skipped. This avoids the per-ID transaction overhead of calling
+    /// [`get`](Self::get) in a loop.
+    pub fn get_many(&self, ids: &[String]) -> Result<Vec<Document>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|id| key::document_key(&self.ns, &self.db, &self.table, id))
+            .collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let values = self.storage.multi_get(&key_refs)?;
+
+        let mut docs = Vec::with_capacity(ids.len());
+        for (id, value) in ids.iter().zip(values) {
+            if let Some(bytes) = value {
+                let record_id = RecordId::new(&self.table, id);
+                docs.push(deserialize(record_id, &bytes)?);
+            }
+        }
+        Ok(docs)
     }
 
     // -------------------------------------------------------------------

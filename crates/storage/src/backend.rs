@@ -128,6 +128,48 @@ impl KvStore for RedbBackend {
         txn.commit().map_err(map_err)?;
         Ok(())
     }
+
+    fn count_prefix(&self, prefix: &[u8]) -> Result<usize> {
+        let end = crate::key::prefix_end(prefix);
+        let txn = self.db.begin_read().map_err(map_err)?;
+        let table = txn.open_table(DATA).map_err(map_err)?;
+        let range: redb::Range<'_, &[u8], &[u8]> =
+            table.range(prefix..end.as_slice()).map_err(map_err)?;
+        // Count by advancing the iterator; never materializes keys or values.
+        let mut n = 0usize;
+        for entry in range {
+            entry.map_err(map_err)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let end = crate::key::prefix_end(prefix);
+        let txn = self.db.begin_read().map_err(map_err)?;
+        let table = txn.open_table(DATA).map_err(map_err)?;
+        let range: redb::Range<'_, &[u8], &[u8]> =
+            table.range(prefix..end.as_slice()).map_err(map_err)?;
+        let mut keys = Vec::new();
+        for entry in range {
+            let (k, _v) = entry.map_err(map_err)?;
+            keys.push(k.value().to_vec());
+        }
+        Ok(keys)
+    }
+
+    fn multi_get(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        // Share a single read transaction (one MVCC snapshot) across all
+        // lookups instead of opening one per key.
+        let txn = self.db.begin_read().map_err(map_err)?;
+        let table = txn.open_table(DATA).map_err(map_err)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let guard: Option<redb::AccessGuard<'_, &[u8]>> = table.get(key).map_err(map_err)?;
+            out.push(guard.map(|g| g.value().to_vec()));
+        }
+        Ok(out)
+    }
 }
 
 /// Map any redb error into `dllb_core::Error::Storage`.

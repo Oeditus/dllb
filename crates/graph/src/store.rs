@@ -160,6 +160,46 @@ impl<'s> EdgeStore<'s> {
         Ok(edges)
     }
 
+    /// Scan all outgoing edges as `(src, dst)` pairs, ignoring properties.
+    ///
+    /// Like [`scan_all_outgoing`](Self::scan_all_outgoing) but reads keys only:
+    /// no value is fetched or deserialized. This is the right choice for
+    /// weight-agnostic algorithms such as connected components, which would
+    /// otherwise pay to deserialize every edge's properties just to discard
+    /// them. Incoming reverse-pointer entries are skipped automatically.
+    pub fn scan_all_edges(&self) -> dllb_core::Result<Vec<(String, String)>> {
+        use dllb_storage::key::{self, tag};
+        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
+        let keys = self.storage.scan_prefix_keys(&prefix)?;
+        let mut edges = Vec::with_capacity(keys.len() / 2);
+
+        for k in keys {
+            let parts = key::parse_key(&k)?;
+            // remainder = src\0<dir>edge_type\0dst
+            let segs: Vec<&[u8]> = parts
+                .remainder
+                .splitn(3, |&b| b == key::SEPARATOR)
+                .collect();
+            if segs.len() < 3 {
+                continue;
+            }
+            let dir_type = segs[1];
+            if dir_type.is_empty() || dir_type[0] != key::dir::OUTGOING {
+                continue; // skip incoming reverse pointers
+            }
+            let src = match std::str::from_utf8(segs[0]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            let dst = match std::str::from_utf8(segs[2]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            edges.push((src, dst));
+        }
+        Ok(edges)
+    }
+
     /// Replace the properties of an existing edge.
     pub fn update_properties(
         &self,

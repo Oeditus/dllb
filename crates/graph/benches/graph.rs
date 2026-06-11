@@ -103,5 +103,100 @@ fn bench_traverse(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_relate, bench_traverse);
+// ---------------------------------------------------------------------------
+// neighbor-only retrieval benchmarks
+// ---------------------------------------------------------------------------
+//
+// These exercise the optimized retrieval path used by the query engine:
+// neighbor IDs are read straight from the sorted keys, with no edge-property
+// deserialization and -- for the incoming direction -- no per-edge point
+// lookup. Incoming fan-out is the headline case, since the previous
+// `incoming`-based path issued one extra read transaction per edge.
+
+fn bench_neighbors(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph/neighbors");
+
+    for fanout in [100usize, 1_000] {
+        // Outgoing star: hub -> leaf:i
+        let out_dir = tempfile::tempdir().unwrap();
+        let out_store = DllbStorage::open(out_dir.path().join("bench.db")).unwrap();
+        let out_es = EdgeStore::new(&out_store, "ns", "db", "out_star");
+        // Incoming star: leaf:i -> hub  (so `hub` has `fanout` incoming edges)
+        let in_dir = tempfile::tempdir().unwrap();
+        let in_store = DllbStorage::open(in_dir.path().join("bench.db")).unwrap();
+        let in_es = EdgeStore::new(&in_store, "ns", "db", "in_star");
+        for i in 0..fanout {
+            out_es
+                .relate(&Edge::new("hub", "links", &format!("leaf:{i}")))
+                .unwrap();
+            in_es
+                .relate(&Edge::new(&format!("leaf:{i}"), "links", "hub"))
+                .unwrap();
+        }
+
+        let out_tv = Traversal::new(&out_es);
+        group.bench_with_input(
+            BenchmarkId::new("outgoing_neighbors", fanout),
+            &fanout,
+            |b, _| {
+                b.iter(|| black_box(out_tv.outgoing_neighbors(black_box("hub")).unwrap()));
+            },
+        );
+
+        let in_tv = Traversal::new(&in_es);
+        group.bench_with_input(
+            BenchmarkId::new("incoming_neighbors", fanout),
+            &fanout,
+            |b, _| {
+                b.iter(|| black_box(in_tv.incoming_neighbors(black_box("hub")).unwrap()));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// full edge-scan benchmark (community/component input)
+// ---------------------------------------------------------------------------
+//
+// Compares the weighted scan (deserializes each edge's properties) against the
+// weightless key-only scan that backs `GRAPH COMPONENTS`.
+
+fn bench_scan_all(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph/scan_all");
+
+    let edge_count = 1_000usize;
+    let dir = tempfile::tempdir().unwrap();
+    let store = DllbStorage::open(dir.path().join("bench.db")).unwrap();
+    let es = EdgeStore::new(&store, "ns", "db", "calls");
+    for i in 0..edge_count {
+        es.relate(
+            &Edge::new(
+                &format!("n{i}"),
+                "calls",
+                &format!("n{}", (i + 1) % edge_count),
+            )
+            .with_property("weight", dllb_core::Value::Float(1.0)),
+        )
+        .unwrap();
+    }
+
+    group.bench_function("weighted_1k", |b| {
+        b.iter(|| black_box(es.scan_all_outgoing().unwrap()));
+    });
+    group.bench_function("weightless_1k", |b| {
+        b.iter(|| black_box(es.scan_all_edges().unwrap()));
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_relate,
+    bench_traverse,
+    bench_neighbors,
+    bench_scan_all
+);
 criterion_main!(benches);
