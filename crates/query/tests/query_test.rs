@@ -1412,3 +1412,139 @@ fn remove_index_falls_back_to_scan() {
         2
     );
 }
+
+// -------------------------------------------------------------------
+// Range-accelerated filtering
+// -------------------------------------------------------------------
+
+/// Seed users with ages 10, 20, 30, 40, 50 and an index on age.
+fn seed_ages(e: &dllb_query::QueryExecutor<'_>) {
+    for (id, age) in [("a", 10), ("b", 20), ("c", 30), ("d", 40), ("f", 50)] {
+        e.run(&format!("CREATE user:{id} SET age = {age};"))
+            .unwrap();
+    }
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+}
+
+#[test]
+fn select_and_count_single_bound_ranges() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_ages(&e);
+
+    // > 25 -> {30,40,50}
+    assert_eq!(
+        row_count(e.run("SELECT * FROM user WHERE age > 25;").unwrap().0),
+        3
+    );
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age > 25;").unwrap().0),
+        3
+    );
+    // >= 30 -> {30,40,50}
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age >= 30;").unwrap().0),
+        3
+    );
+    // < 30 -> {10,20}
+    assert_eq!(
+        row_count(e.run("SELECT * FROM user WHERE age < 30;").unwrap().0),
+        2
+    );
+    // <= 20 -> {10,20}
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age <= 20;").unwrap().0),
+        2
+    );
+}
+
+#[test]
+fn between_via_and_is_covered() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_ages(&e);
+
+    // 20 <= age <= 40 -> {20,30,40}
+    assert_eq!(
+        count_value(
+            e.run("COUNT user WHERE age >= 20 AND age <= 40;")
+                .unwrap()
+                .0
+        ),
+        3
+    );
+    // 20 < age < 40 -> {30}
+    let (rows, _) = e
+        .run("SELECT * FROM user WHERE age > 20 AND age < 40;")
+        .unwrap();
+    assert_eq!(row_count(rows), 1);
+}
+
+#[test]
+fn range_with_residual_filter() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE user:a SET age = 30, tier = 'gold';").unwrap();
+    e.run("CREATE user:b SET age = 40, tier = 'silver';")
+        .unwrap();
+    e.run("CREATE user:c SET age = 50, tier = 'gold';").unwrap();
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+
+    // age >= 30 narrows via the index; tier = 'gold' is the residual filter.
+    let (rows, _) = e
+        .run("SELECT * FROM user WHERE age >= 30 AND tier = 'gold';")
+        .unwrap();
+    assert_eq!(row_count(rows), 2);
+}
+
+#[test]
+fn string_range_uses_index() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    for (id, name) in [("a", "alice"), ("b", "bob"), ("c", "carol"), ("d", "dave")] {
+        e.run(&format!("CREATE user:{id} SET name = '{name}';"))
+            .unwrap();
+    }
+    e.run("DEFINE INDEX by_name ON user FIELDS name;").unwrap();
+
+    // name >= 'bob' -> {bob, carol, dave}
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE name >= 'bob';").unwrap().0),
+        3
+    );
+    // name < 'carol' -> {alice, bob}
+    assert_eq!(
+        row_count(e.run("SELECT * FROM user WHERE name < 'carol';").unwrap().0),
+        2
+    );
+}
+
+#[test]
+fn range_is_maintained_after_update_and_delete() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_ages(&e);
+
+    // Move user:a from 10 into the >25 range.
+    e.run("UPDATE user:a SET age = 35;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age > 25;").unwrap().0),
+        4
+    );
+
+    // Delete a high value and recheck.
+    e.run("DELETE user:f;").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age > 25;").unwrap().0),
+        3
+    );
+    // Remaining ages: a=35, b=20, c=30, d=40. In [30,40] -> a, c, d.
+    assert_eq!(
+        row_count(
+            e.run("SELECT * FROM user WHERE age >= 30 AND age <= 40;")
+                .unwrap()
+                .0
+        ),
+        3
+    );
+}

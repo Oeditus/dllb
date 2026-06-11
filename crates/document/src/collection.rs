@@ -480,4 +480,24 @@ impl<'s> Collection<'s> {
             value,
         )
     }
+
+    /// Find the record IDs whose indexed value falls in the given range,
+    /// without fetching documents. Each bound is optional and carries an
+    /// inclusive flag (`true` = inclusive).
+    pub fn find_ids_by_range(
+        &self,
+        index_name: &str,
+        lower: Option<&index::RangeBound>,
+        upper: Option<&index::RangeBound>,
+    ) -> Result<Vec<String>> {
+        index::find_ids_by_range(
+            self.storage,
+            &self.ns,
+            &self.db,
+            &self.table,
+            index_name,
+            lower,
+            upper,
+        )
+    }
 }

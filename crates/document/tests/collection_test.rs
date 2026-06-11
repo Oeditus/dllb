@@ -368,6 +368,54 @@ fn collection_load_attaches_catalog_indexes() {
     assert_eq!(docs.len(), 2);
 }
 
+#[test]
+fn find_ids_by_range_bounds_are_correct() {
+    let (_dir, storage) = temp_storage();
+    let idx = IndexDefinition {
+        name: "by_age".into(),
+        fields: vec!["age".into()],
+        unique: false,
+    };
+    let c = coll(&storage).with_index(idx);
+    for (id, age) in [("a", 10), ("b", 20), ("c", 30), ("d", 40)] {
+        c.create(make_doc(id, id, age)).unwrap();
+    }
+
+    // 20 <= age <= 30  -> b, c
+    let ids = c
+        .find_ids_by_range(
+            "by_age",
+            Some(&(Value::Int(20), true)),
+            Some(&(Value::Int(30), true)),
+        )
+        .unwrap();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["b", "c"]);
+
+    // age > 20  -> c, d
+    let gt = c
+        .find_ids_by_range("by_age", Some(&(Value::Int(20), false)), None)
+        .unwrap();
+    assert_eq!(gt.len(), 2);
+
+    // age < 40  -> a, b, c
+    let lt = c
+        .find_ids_by_range("by_age", None, Some(&(Value::Int(40), false)))
+        .unwrap();
+    assert_eq!(lt.len(), 3);
+
+    // 20 < age < 40 (both exclusive) -> c
+    let between = c
+        .find_ids_by_range(
+            "by_age",
+            Some(&(Value::Int(20), false)),
+            Some(&(Value::Int(40), false)),
+        )
+        .unwrap();
+    assert_eq!(between, vec!["c"]);
+}
+
 // -------------------------------------------------------------------
 // Cross-table isolation
 // -------------------------------------------------------------------
