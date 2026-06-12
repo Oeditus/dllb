@@ -416,6 +416,98 @@ fn find_ids_by_range_bounds_are_correct() {
     assert_eq!(between, vec!["c"]);
 }
 
+#[test]
+fn composite_index_scan_full_prefix_and_range() {
+    let (_dir, storage) = temp_storage();
+    let idx = IndexDefinition {
+        name: "by_tenant_age".into(),
+        fields: vec!["tenant".into(), "age".into()],
+        unique: false,
+    };
+    let c = coll(&storage).with_index(idx);
+    let mk = |id: &str, tenant: &str, age: i64| {
+        Document::new(RecordId::new("user", id))
+            .with_field("tenant", Value::String(tenant.into()))
+            .with_field("age", Value::Int(age))
+    };
+    c.create(mk("a", "acme", 30)).unwrap();
+    c.create(mk("b", "acme", 40)).unwrap();
+    c.create(mk("c", "acme", 50)).unwrap();
+    c.create(mk("d", "globex", 30)).unwrap();
+
+    // Full tuple: tenant=acme AND age=40 -> {b}
+    let full = c
+        .find_ids_for_scan(
+            "by_tenant_age",
+            &[Value::String("acme".into()), Value::Int(40)],
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+    assert_eq!(full, vec!["b"]);
+
+    // Leading prefix: tenant=acme -> {a,b,c}
+    let mut prefix = c
+        .find_ids_for_scan(
+            "by_tenant_age",
+            &[Value::String("acme".into())],
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+    prefix.sort();
+    assert_eq!(prefix, vec!["a", "b", "c"]);
+
+    // Prefix + range: tenant=acme AND age > 30 -> {b,c}
+    let mut pr = c
+        .find_ids_for_scan(
+            "by_tenant_age",
+            &[Value::String("acme".into())],
+            Some(&(Value::Int(30), false)),
+            None,
+            2,
+        )
+        .unwrap();
+    pr.sort();
+    assert_eq!(pr, vec!["b", "c"]);
+
+    // Prefix + bounded range: tenant=acme AND 30 <= age <= 40 -> {a,b}
+    let mut between = c
+        .find_ids_for_scan(
+            "by_tenant_age",
+            &[Value::String("acme".into())],
+            Some(&(Value::Int(30), true)),
+            Some(&(Value::Int(40), true)),
+            2,
+        )
+        .unwrap();
+    between.sort();
+    assert_eq!(between, vec!["a", "b"]);
+}
+
+#[test]
+fn composite_unique_index_enforces_the_tuple() {
+    let (_dir, storage) = temp_storage();
+    let idx = IndexDefinition {
+        name: "uq_tenant_email".into(),
+        fields: vec!["tenant".into(), "email".into()],
+        unique: true,
+    };
+    let c = coll(&storage).with_index(idx);
+    let mk = |id: &str, tenant: &str, email: &str| {
+        Document::new(RecordId::new("user", id))
+            .with_field("tenant", Value::String(tenant.into()))
+            .with_field("email", Value::String(email.into()))
+    };
+    c.create(mk("a", "acme", "x@y.z")).unwrap();
+    // Same email but a different tenant -> the tuple differs, so it is allowed.
+    c.create(mk("b", "globex", "x@y.z")).unwrap();
+    // Identical tuple -> rejected.
+    assert!(c.create(mk("c", "acme", "x@y.z")).is_err());
+}
+
 // -------------------------------------------------------------------
 // Cross-table isolation
 // -------------------------------------------------------------------

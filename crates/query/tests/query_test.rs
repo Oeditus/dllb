@@ -1548,3 +1548,136 @@ fn range_is_maintained_after_update_and_delete() {
         3
     );
 }
+
+// -------------------------------------------------------------------
+// Composite (multi-field) index planning
+// -------------------------------------------------------------------
+
+/// Seed (tenant, age) users and a composite index on (tenant, age).
+fn seed_tenant_age(e: &dllb_query::QueryExecutor<'_>) {
+    for (id, tenant, age) in [
+        ("a", "acme", 30),
+        ("b", "acme", 40),
+        ("c", "acme", 50),
+        ("d", "globex", 30),
+    ] {
+        e.run(&format!(
+            "CREATE user:{id} SET tenant = '{tenant}', age = {age};"
+        ))
+        .unwrap();
+    }
+    e.run("DEFINE INDEX by_tenant_age ON user FIELDS tenant, age;")
+        .unwrap();
+}
+
+#[test]
+fn composite_full_tuple_is_covered() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_tenant_age(&e);
+
+    // tenant = acme AND age = 40 -> {b}
+    assert_eq!(
+        row_count(
+            e.run("SELECT * FROM user WHERE tenant = 'acme' AND age = 40;")
+                .unwrap()
+                .0
+        ),
+        1
+    );
+    assert_eq!(
+        count_value(
+            e.run("COUNT user WHERE tenant = 'acme' AND age = 40;")
+                .unwrap()
+                .0
+        ),
+        1
+    );
+}
+
+#[test]
+fn composite_leading_prefix_and_prefix_range() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_tenant_age(&e);
+
+    // Leading-prefix equality: tenant = acme -> {a,b,c}
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE tenant = 'acme';").unwrap().0),
+        3
+    );
+    // Equality prefix + range on the next field: tenant = acme AND age > 30 -> {b,c}
+    assert_eq!(
+        row_count(
+            e.run("SELECT * FROM user WHERE tenant = 'acme' AND age > 30;")
+                .unwrap()
+                .0
+        ),
+        2
+    );
+    // tenant = acme AND 30 <= age <= 40 -> {a,b}
+    assert_eq!(
+        count_value(
+            e.run("COUNT user WHERE tenant = 'acme' AND age >= 30 AND age <= 40;")
+                .unwrap()
+                .0
+        ),
+        2
+    );
+}
+
+#[test]
+fn composite_non_leading_field_alone_still_correct_via_scan() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_tenant_age(&e);
+
+    // A constraint only on the non-leading field cannot use the composite
+    // index, but must still return correct results via the scan fallback.
+    // age = 30 -> {a, d}
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE age = 30;").unwrap().0),
+        2
+    );
+}
+
+#[test]
+fn composite_unique_enforces_tuple_not_first_field() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+
+    e.run("DEFINE INDEX uq ON user FIELDS tenant, email UNIQUE;")
+        .unwrap();
+    e.run("CREATE user:a SET tenant = 'acme', email = 'x@y.z';")
+        .unwrap();
+    // Same email, different tenant -> allowed (tuple differs).
+    e.run("CREATE user:b SET tenant = 'globex', email = 'x@y.z';")
+        .unwrap();
+    // Identical (tenant, email) tuple -> rejected.
+    assert!(
+        e.run("CREATE user:c SET tenant = 'acme', email = 'x@y.z';")
+            .is_err()
+    );
+}
+
+#[test]
+fn composite_index_maintained_after_update() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    seed_tenant_age(&e);
+
+    // Move user:a out of acme into globex; the composite buckets must follow.
+    e.run("UPDATE user:a SET tenant = 'globex';").unwrap();
+    assert_eq!(
+        count_value(e.run("COUNT user WHERE tenant = 'acme';").unwrap().0),
+        2
+    );
+    assert_eq!(
+        count_value(
+            e.run("COUNT user WHERE tenant = 'globex' AND age = 30;")
+                .unwrap()
+                .0
+        ),
+        2
+    );
+}

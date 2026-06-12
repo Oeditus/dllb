@@ -119,11 +119,11 @@ impl<'s> Collection<'s> {
             return Err(Error::Other(format!("record already exists: {id}")));
         }
 
-        // Unique constraint checks
+        // Unique constraint checks (over the full indexed tuple; only enforced
+        // when every indexed field is present).
         for idx in &self.indexes {
             if idx.unique
-                && let Some(field_name) = idx.fields.first()
-                && let Some(value) = doc.fields.get(field_name)
+                && let Some(values) = index::collect_index_values(&doc, idx)
             {
                 index::check_unique_constraint(
                     self.storage,
@@ -131,7 +131,7 @@ impl<'s> Collection<'s> {
                     &self.db,
                     &self.table,
                     idx,
-                    value,
+                    &values,
                     id,
                 )?;
             }
@@ -498,6 +498,30 @@ impl<'s> Collection<'s> {
             index_name,
             lower,
             upper,
+        )
+    }
+
+    /// General index lookup: equality values for a leading prefix of the
+    /// index's fields plus an optional range on the next field. `field_count`
+    /// is the index's total field count (used to recover record IDs).
+    pub fn find_ids_for_scan(
+        &self,
+        index_name: &str,
+        eq: &[Value],
+        lower: Option<&index::RangeBound>,
+        upper: Option<&index::RangeBound>,
+        field_count: usize,
+    ) -> Result<Vec<String>> {
+        index::find_ids(
+            self.storage,
+            &self.ns,
+            &self.db,
+            &self.table,
+            index_name,
+            eq,
+            lower,
+            upper,
+            field_count,
         )
     }
 }

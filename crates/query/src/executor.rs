@@ -596,7 +596,7 @@ impl<'s> QueryExecutor<'s> {
             Some(clause) => match plan_index_lookup(coll.indexes(), clause) {
                 Some(plan) => {
                     let ids = run_index_plan(&coll, &plan)?;
-                    if plan.covers() {
+                    if plan.covers {
                         // The index fully answers the predicate: the number of
                         // matching IDs is the count, no documents are read.
                         ids.len()
@@ -793,11 +793,11 @@ impl<'s> QueryExecutor<'s> {
         fields: &[String],
         unique: bool,
     ) -> Result<QueryResult> {
-        let Some(field) = fields.first().cloned() else {
+        if fields.is_empty() {
             return Err(dllb_core::Error::Query(
                 "DEFINE INDEX requires at least one field".into(),
             ));
-        };
+        }
         let def = IndexDefinition {
             name: name.to_string(),
             fields: fields.to_vec(),
@@ -805,21 +805,19 @@ impl<'s> QueryExecutor<'s> {
         };
 
         // Scan existing documents to backfill entries (and validate uniqueness
-        // up front so a failed constraint persists nothing).
+        // up front so a failed constraint persists nothing). Uniqueness is over
+        // the full indexed tuple.
         let coll = Collection::new(self.storage, &self.ns, &self.db, table);
         let docs = coll.scan_all()?;
 
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut entry_puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for doc in &docs {
-            if let Some(value) = doc.fields.get(&field)
-                && !value.is_none()
-                && unique
-            {
-                let encoded = index::encode_index_value(value)?;
-                if !seen.insert(encoded) {
+            if unique && let Some(values) = index::collect_index_values(doc, &def) {
+                let key_part = index::encode_composite_key_part(&values)?;
+                if !seen.insert(key_part) {
                     return Err(dllb_core::Error::Schema(format!(
-                        "cannot create unique index '{name}': field '{field}' has duplicate values"
+                        "cannot create unique index '{name}': duplicate values for the indexed fields"
                     )));
                 }
             }
@@ -896,142 +894,53 @@ fn algo_str(algo: &crate::ast::CommunityAlgorithm) -> &'static str {
 
 /// A chosen secondary-index access path for a `WHERE` clause.
 ///
-/// `covers` is `true` when the index access alone fully satisfies the
-/// predicate (so a `COUNT` may use the candidate count directly); `false` when
-/// additional conjuncts must still be applied to the candidates.
-enum IndexPlan {
-    /// Exact-match probe (`field = value`).
-    Eq {
-        index_name: String,
-        value: Value,
-        covers: bool,
-    },
-    /// Range scan with optional lower/upper bounds, each `(value, inclusive)`.
-    Range {
-        index_name: String,
-        lower: Option<(Value, bool)>,
-        upper: Option<(Value, bool)>,
-        covers: bool,
-    },
+/// `eq` holds equality values for a leading prefix of the index's fields;
+/// `lower`/`upper` apply a range to the field that follows that prefix.
+/// `covers` is `true` when the index access alone fully satisfies the predicate
+/// (so a `COUNT` may use the candidate count directly); `false` when extra
+/// conjuncts must still be applied to the candidates as a residual filter.
+struct IndexPlan {
+    index_name: String,
+    eq: Vec<Value>,
+    lower: Option<(Value, bool)>,
+    upper: Option<(Value, bool)>,
+    field_count: usize,
+    covers: bool,
 }
 
-impl IndexPlan {
-    fn covers(&self) -> bool {
-        match self {
-            IndexPlan::Eq { covers, .. } | IndexPlan::Range { covers, .. } => *covers,
-        }
-    }
-
-    fn set_covers(&mut self, value: bool) {
-        match self {
-            IndexPlan::Eq { covers, .. } | IndexPlan::Range { covers, .. } => *covers = value,
-        }
-    }
-}
-
-/// One side of a range predicate.
-enum RangeSide {
+/// An indexable predicate extracted from a single `WHERE` conjunct.
+enum AtomKind {
+    Eq(Value),
     Lower(Value, bool),
     Upper(Value, bool),
 }
 
 /// Run a chosen plan, returning the candidate record IDs.
 fn run_index_plan(coll: &Collection<'_>, plan: &IndexPlan) -> Result<Vec<String>> {
-    match plan {
-        IndexPlan::Eq {
-            index_name, value, ..
-        } => coll.find_ids_by_index(index_name, value),
-        IndexPlan::Range {
-            index_name,
-            lower,
-            upper,
-            ..
-        } => coll.find_ids_by_range(index_name, lower.as_ref(), upper.as_ref()),
-    }
+    coll.find_ids_for_scan(
+        &plan.index_name,
+        &plan.eq,
+        plan.lower.as_ref(),
+        plan.upper.as_ref(),
+        plan.field_count,
+    )
 }
 
-/// Choose a secondary index to accelerate `clause`, if one applies.
-///
-/// Handles equality (`field = v`) and range (`> < >= <=`) predicates on the
-/// leading field of an index, plus a two-bound `AND` on the same indexed field
-/// (a `BETWEEN`). For other `AND`s, an indexed conjunct narrows candidates
-/// while the full clause is re-applied as a residual filter (`covers = false`).
-/// `Ne`, `IS NONE`, and non-encodable values (arrays, `NONE`) yield no plan.
-fn plan_index_lookup(indexes: &[IndexDefinition], clause: &WhereClause) -> Option<IndexPlan> {
-    if indexes.is_empty() {
-        return None;
-    }
+/// Flatten an `AND` tree into its individual conjuncts.
+fn collect_conjuncts<'a>(clause: &'a WhereClause, out: &mut Vec<&'a WhereClause>) {
     match clause {
-        WhereClause::Cmp { field, op, value } => single_cmp_plan(indexes, field, op, value, true),
         WhereClause::And(left, right) => {
-            // A pair of bounds on the same indexed field is a fully-covered range.
-            if let Some(plan) = combined_range_plan(indexes, left, right) {
-                return Some(plan);
-            }
-            // Otherwise narrow on an indexed conjunct from either side and
-            // re-apply the whole clause as a residual filter.
-            let mut plan =
-                plan_index_lookup(indexes, left).or_else(|| plan_index_lookup(indexes, right))?;
-            plan.set_covers(false);
-            Some(plan)
+            collect_conjuncts(left, out);
+            collect_conjuncts(right, out);
         }
-        _ => None,
+        other => out.push(other),
     }
 }
 
-/// Build a plan for a single `field <op> value` comparison on an indexed field.
-fn single_cmp_plan(
-    indexes: &[IndexDefinition],
-    field: &str,
-    op: &CmpOp,
-    value: &Literal,
-    covers: bool,
-) -> Option<IndexPlan> {
-    let v = value.to_value();
-    if matches!(v, Value::Array(_) | Value::None) {
-        return None;
-    }
-    let idx = indexes
-        .iter()
-        .find(|i| i.fields.first().is_some_and(|f| f == field))?;
-    let index_name = idx.name.clone();
-    match op {
-        CmpOp::Eq => Some(IndexPlan::Eq {
-            index_name,
-            value: v,
-            covers,
-        }),
-        CmpOp::Gt => Some(IndexPlan::Range {
-            index_name,
-            lower: Some((v, false)),
-            upper: None,
-            covers,
-        }),
-        CmpOp::Gte => Some(IndexPlan::Range {
-            index_name,
-            lower: Some((v, true)),
-            upper: None,
-            covers,
-        }),
-        CmpOp::Lt => Some(IndexPlan::Range {
-            index_name,
-            lower: None,
-            upper: Some((v, false)),
-            covers,
-        }),
-        CmpOp::Lte => Some(IndexPlan::Range {
-            index_name,
-            lower: None,
-            upper: Some((v, true)),
-            covers,
-        }),
-        // `!=` cannot be answered by a contiguous index range.
-        CmpOp::Ne => None,
-    }
-}
-
-/// Classify a clause as one side of a range bound on a named field.
-fn as_range_side(clause: &WhereClause) -> Option<(&str, RangeSide)> {
+/// Classify a conjunct as an indexable atom on a named field, if possible.
+///
+/// `Ne`, `IS NONE`, and non-encodable values (arrays, `NONE`) are not indexable.
+fn atom_of(clause: &WhereClause) -> Option<(&str, AtomKind)> {
     let WhereClause::Cmp { field, op, value } = clause else {
         return None;
     };
@@ -1039,42 +948,139 @@ fn as_range_side(clause: &WhereClause) -> Option<(&str, RangeSide)> {
     if matches!(v, Value::Array(_) | Value::None) {
         return None;
     }
-    let side = match op {
-        CmpOp::Gt => RangeSide::Lower(v, false),
-        CmpOp::Gte => RangeSide::Lower(v, true),
-        CmpOp::Lt => RangeSide::Upper(v, false),
-        CmpOp::Lte => RangeSide::Upper(v, true),
-        _ => return None,
+    let kind = match op {
+        CmpOp::Eq => AtomKind::Eq(v),
+        CmpOp::Gt => AtomKind::Lower(v, false),
+        CmpOp::Gte => AtomKind::Lower(v, true),
+        CmpOp::Lt => AtomKind::Upper(v, false),
+        CmpOp::Lte => AtomKind::Upper(v, true),
+        CmpOp::Ne => return None,
     };
-    Some((field.as_str(), side))
+    Some((field.as_str(), kind))
 }
 
-/// Combine two bounds on the same indexed field into a covered range plan.
-fn combined_range_plan(
-    indexes: &[IndexDefinition],
-    left: &WhereClause,
-    right: &WhereClause,
-) -> Option<IndexPlan> {
-    let (lf, ls) = as_range_side(left)?;
-    let (rf, rs) = as_range_side(right)?;
-    if lf != rf {
+/// Assemble an `IndexPlan` for `idx` (leaving `covers` for the caller to set).
+fn make_plan(
+    idx: &IndexDefinition,
+    eq: Vec<Value>,
+    lower: Option<(Value, bool)>,
+    upper: Option<(Value, bool)>,
+) -> IndexPlan {
+    IndexPlan {
+        index_name: idx.name.clone(),
+        eq,
+        lower,
+        upper,
+        field_count: idx.fields.len(),
+        covers: false,
+    }
+}
+
+/// Choose a secondary index to accelerate `clause`, if one applies.
+///
+/// Performs classic leftmost-prefix matching: equality on the leading index
+/// fields, optionally followed by a range on the next field. The chosen index
+/// maximizes the number of consumed conjuncts; `covers` is set when every
+/// conjunct was consumed, otherwise the full WHERE is re-applied as a residual
+/// filter. Non-indexable predicates (and non-leading-field constraints) keep
+/// the scan path.
+fn plan_index_lookup(indexes: &[IndexDefinition], clause: &WhereClause) -> Option<IndexPlan> {
+    if indexes.is_empty() {
         return None;
     }
-    let idx = indexes
-        .iter()
-        .find(|i| i.fields.first().is_some_and(|f| f == lf))?;
-    // Require exactly one lower and one upper bound.
-    let (lower, upper) = match (ls, rs) {
-        (RangeSide::Lower(lv, li), RangeSide::Upper(uv, ui))
-        | (RangeSide::Upper(uv, ui), RangeSide::Lower(lv, li)) => ((lv, li), (uv, ui)),
-        _ => return None,
-    };
-    Some(IndexPlan::Range {
-        index_name: idx.name.clone(),
-        lower: Some(lower),
-        upper: Some(upper),
-        covers: true,
-    })
+    let mut conjuncts = Vec::new();
+    collect_conjuncts(clause, &mut conjuncts);
+    let total = conjuncts.len();
+
+    let mut best: Option<(IndexPlan, usize)> = None;
+    for idx in indexes {
+        if let Some((plan, consumed)) = plan_for_index(idx, &conjuncts) {
+            let better = match &best {
+                None => true,
+                // Prefer consuming more conjuncts; tie-break on a longer
+                // equality prefix (more selective).
+                Some((bp, bc)) => (consumed, plan.eq.len()) > (*bc, bp.eq.len()),
+            };
+            if better {
+                best = Some((plan, consumed));
+            }
+        }
+    }
+
+    let (mut plan, consumed) = best?;
+    plan.covers = consumed == total;
+    Some(plan)
+}
+
+/// Match a single index against the conjuncts using leftmost-prefix rules.
+///
+/// Returns the plan plus the number of conjuncts consumed, or `None` when the
+/// index's first field has no usable predicate.
+fn plan_for_index(idx: &IndexDefinition, conjuncts: &[&WhereClause]) -> Option<(IndexPlan, usize)> {
+    let mut used = vec![false; conjuncts.len()];
+    let mut eq: Vec<Value> = Vec::new();
+    let mut consumed = 0usize;
+
+    for field in &idx.fields {
+        // 1) Extend the equality prefix if an unused `field = v` atom exists.
+        let mut matched_eq = false;
+        for (ci, c) in conjuncts.iter().enumerate() {
+            if used[ci] {
+                continue;
+            }
+            if let Some((f, AtomKind::Eq(v))) = atom_of(c)
+                && f == field.as_str()
+            {
+                used[ci] = true;
+                eq.push(v);
+                consumed += 1;
+                matched_eq = true;
+                break;
+            }
+        }
+        if matched_eq {
+            continue;
+        }
+
+        // 2) No equality on this field: consume up to one lower and one upper
+        //    range bound on it, then stop (a range ends the usable prefix).
+        let mut lower = None;
+        let mut upper = None;
+        for (ci, c) in conjuncts.iter().enumerate() {
+            if used[ci] {
+                continue;
+            }
+            match atom_of(c) {
+                Some((f, AtomKind::Lower(v, incl))) if f == field.as_str() && lower.is_none() => {
+                    lower = Some((v, incl));
+                    used[ci] = true;
+                    consumed += 1;
+                }
+                Some((f, AtomKind::Upper(v, incl))) if f == field.as_str() && upper.is_none() => {
+                    upper = Some((v, incl));
+                    used[ci] = true;
+                    consumed += 1;
+                }
+                _ => {}
+            }
+        }
+        if lower.is_some() || upper.is_some() {
+            return Some((make_plan(idx, eq, lower, upper), consumed));
+        }
+
+        // 3) Neither equality nor range on this field: stop. The index is
+        //    usable only if we already matched a leading equality prefix.
+        if eq.is_empty() {
+            return None;
+        }
+        return Some((make_plan(idx, eq, None, None), consumed));
+    }
+
+    // Every field matched an equality (full-tuple lookup).
+    if eq.is_empty() {
+        return None;
+    }
+    Some((make_plan(idx, eq, None, None), consumed))
 }
 
 // ---------------------------------------------------------------------------
