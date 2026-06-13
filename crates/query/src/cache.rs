@@ -107,6 +107,15 @@ pub enum CacheKind {
     },
     /// `GRAPH COMPONENTS` -- connected components (no parameters).
     Components,
+    /// `GRAPH PAGERANK` keyed by damping (as raw bits), iteration cap, and the
+    /// row limit (the cached payload is already truncated to it).
+    PageRank {
+        damping_bits: u64,
+        max_iterations: usize,
+        limit: Option<u64>,
+    },
+    /// `GRAPH CENTRALITY` keyed by the degree mode name and row limit.
+    Centrality { mode: String, limit: Option<u64> },
 }
 
 impl CacheKind {
@@ -116,6 +125,23 @@ impl CacheKind {
             algorithm: algorithm.to_string(),
             max_iterations,
             resolution_bits: resolution.to_bits(),
+        }
+    }
+
+    /// Construct a `PageRank` key from typed parameters.
+    pub fn pagerank(damping: f64, max_iterations: usize, limit: Option<u64>) -> Self {
+        CacheKind::PageRank {
+            damping_bits: damping.to_bits(),
+            max_iterations,
+            limit,
+        }
+    }
+
+    /// Construct a `Centrality` key from a mode name and row limit.
+    pub fn centrality(mode: &str, limit: Option<u64>) -> Self {
+        CacheKind::Centrality {
+            mode: mode.to_string(),
+            limit,
         }
     }
 }

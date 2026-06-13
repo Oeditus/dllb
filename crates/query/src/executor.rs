@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
 use dllb_document::{Collection, Document, IndexDefinition, IndexKind, index};
-use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal, connected_components};
+use dllb_graph::{
+    CentralityKind, CommunityOptions, Edge, EdgeStore, PageRankOptions, Traversal,
+    connected_components, degree_centrality, pagerank, shortest_path,
+};
 use dllb_graph::{community::Algorithm, detect_communities_weighted};
 use dllb_storage::db::DllbStorage;
 use dllb_storage::key;
@@ -25,6 +28,8 @@ pub enum QueryResult {
     Updated { id: RecordId },
     /// A record was deleted.
     Deleted { existed: bool },
+    /// Multiple records were deleted by a `DELETE ... WHERE` statement.
+    DeletedMany { count: usize },
     /// Rows returned from a SELECT.
     Rows(Vec<BTreeMap<String, Value>>),
     /// Communities returned from a `GRAPH COMMUNITIES` statement.
@@ -150,9 +155,13 @@ impl<'s> QueryExecutor<'s> {
                 fields,
                 from,
                 filter,
+                order_by,
                 limit,
-            } => self.exec_select(fields, from, filter.as_ref(), *limit),
+            } => self.exec_select(fields, from, filter.as_ref(), order_by, *limit),
             Statement::Delete { table, id } => self.exec_delete(table, id),
+            Statement::DeleteWhere { table, filter } => {
+                self.exec_delete_where(table, filter.as_ref())
+            }
             Statement::Relate {
                 src,
                 edge_type,
@@ -170,7 +179,11 @@ impl<'s> QueryExecutor<'s> {
                 fields,
                 filter,
             } => self.exec_update(target, fields, filter.as_ref()),
-            Statement::Count { table, filter } => self.exec_count(table, filter.as_ref()),
+            Statement::Count {
+                table,
+                filter,
+                group_by,
+            } => self.exec_count(table, filter.as_ref(), group_by.as_deref()),
             Statement::GraphComponents { table } => self.exec_graph_components(table),
             Statement::DefineIndex {
                 name,
@@ -196,14 +209,53 @@ impl<'s> QueryExecutor<'s> {
                 table,
                 field,
                 query,
+                filter,
                 limit,
-            } => self.exec_search(table, field, query, *limit),
+            } => self.exec_search(table, field, query, filter.as_ref(), *limit),
             Statement::VectorSearch {
                 table,
                 field,
                 vector,
+                filter,
                 k,
-            } => self.exec_vector_search(table, field, vector, *k),
+            } => self.exec_vector_search(table, field, vector, filter.as_ref(), *k),
+            Statement::HybridSearch {
+                table,
+                text_field,
+                query,
+                vector_field,
+                vector,
+                alpha,
+                filter,
+                limit,
+            } => self.exec_hybrid_search(
+                table,
+                text_field,
+                query,
+                vector_field,
+                vector,
+                *alpha,
+                filter.as_ref(),
+                *limit,
+            ),
+            Statement::GraphPagerank {
+                table,
+                damping,
+                max_iterations,
+                limit,
+            } => self.exec_graph_pagerank(table, *damping, *max_iterations, *limit),
+            Statement::GraphCentrality { table, mode, limit } => {
+                self.exec_graph_centrality(table, *mode, *limit)
+            }
+            Statement::GraphPath {
+                src,
+                dst,
+                table,
+                max_depth,
+            } => self.exec_graph_path(src, dst, table, *max_depth),
+            Statement::GraphEdges { table, filter } => {
+                self.exec_graph_edges(table, filter.as_ref())
+            }
         }
     }
 
@@ -258,6 +310,23 @@ impl<'s> QueryExecutor<'s> {
                 let version = self.versions.current(&self.ns, &self.db, table);
                 self.cache.get(&key, version)
             }
+            Statement::GraphPagerank {
+                table,
+                damping,
+                max_iterations,
+                limit,
+            } => {
+                let kind = CacheKind::pagerank(*damping, *max_iterations, *limit);
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                self.cache.get(&key, version)
+            }
+            Statement::GraphCentrality { table, mode, limit } => {
+                let kind = CacheKind::centrality(centrality_mode_str(mode), *limit);
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                self.cache.get(&key, version)
+            }
             _ => None,
         }
     }
@@ -295,6 +364,30 @@ impl<'s> QueryExecutor<'s> {
             // Populate cache after a successful components computation.
             (Statement::GraphComponents { table }, QueryResult::Components { .. }) => {
                 let key = CacheKey::new(&self.ns, &self.db, table, CacheKind::Components, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                let payload = crate::format::format_result(result, outcome);
+                self.cache.insert(key, payload, version);
+            }
+
+            // Populate cache after pagerank / centrality computations.
+            (
+                Statement::GraphPagerank {
+                    table,
+                    damping,
+                    max_iterations,
+                    limit,
+                },
+                QueryResult::Rows(_),
+            ) => {
+                let kind = CacheKind::pagerank(*damping, *max_iterations, *limit);
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
+                let version = self.versions.current(&self.ns, &self.db, table);
+                let payload = crate::format::format_result(result, outcome);
+                self.cache.insert(key, payload, version);
+            }
+            (Statement::GraphCentrality { table, mode, limit }, QueryResult::Rows(_)) => {
+                let kind = CacheKind::centrality(centrality_mode_str(mode), *limit);
+                let key = CacheKey::new(&self.ns, &self.db, table, kind, outcome);
                 let version = self.versions.current(&self.ns, &self.db, table);
                 let payload = crate::format::format_result(result, outcome);
                 self.cache.insert(key, payload, version);
@@ -385,9 +478,10 @@ impl<'s> QueryExecutor<'s> {
         select_fields: &SelectFields,
         from: &FromTarget,
         filter: Option<&WhereClause>,
+        order_by: &[OrderKey],
         limit: Option<u64>,
     ) -> Result<QueryResult> {
-        // Graph traversal has its own execution path.
+        // Graph traversal has its own execution path (ordering is not applied).
         if let SelectFields::Traversal(chain) = select_fields {
             return self.exec_traversal_select(chain, from, filter, limit);
         }
@@ -419,13 +513,18 @@ impl<'s> QueryExecutor<'s> {
         };
 
         // Apply WHERE filter.
-        let filtered: Vec<Document> = match filter {
+        let mut filtered: Vec<Document> = match filter {
             Some(clause) => docs
                 .into_iter()
                 .filter(|d| matches_where(d, clause))
                 .collect(),
             None => docs,
         };
+
+        // Apply ORDER BY before LIMIT so top-N reflects the full ordering.
+        if !order_by.is_empty() {
+            sort_documents(&mut filtered, order_by);
+        }
 
         // Apply LIMIT.
         let limited: Vec<Document> = match limit {
@@ -679,8 +778,18 @@ impl<'s> QueryExecutor<'s> {
         }
     }
 
-    fn exec_count(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
+    fn exec_count(
+        &self,
+        table: &str,
+        filter: Option<&WhereClause>,
+        group_by: Option<&str>,
+    ) -> Result<QueryResult> {
         let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
+
+        if let Some(field) = group_by {
+            return self.exec_count_grouped(&coll, filter, field);
+        }
+
         let count = match filter {
             // COUNT(*) is a cheap key-range cardinality.
             None => coll.count()?,
@@ -710,6 +819,72 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Count { count })
     }
 
+    /// `COUNT ... GROUP BY field`: one row per distinct value of `field`
+    /// (missing/NONE share a single bucket), sorted by count descending.
+    fn exec_count_grouped(
+        &self,
+        coll: &Collection<'_>,
+        filter: Option<&WhereClause>,
+        field: &str,
+    ) -> Result<QueryResult> {
+        // Narrow candidates by index when possible; the residual WHERE is
+        // always reapplied below.
+        let docs = match filter.and_then(|c| plan_index_lookup(coll.indexes(), c)) {
+            Some(plan) => {
+                let ids = run_index_plan(coll, &plan)?;
+                coll.get_many(&ids)?
+            }
+            None => coll.scan_all()?,
+        };
+
+        let mut order: Vec<String> = Vec::new();
+        let mut buckets: HashMap<String, (Value, usize)> = HashMap::new();
+        for doc in &docs {
+            if let Some(clause) = filter
+                && !matches_where(doc, clause)
+            {
+                continue;
+            }
+            let value = match doc.fields.get(field) {
+                Some(v) if !v.is_none() => v.clone(),
+                _ => Value::None,
+            };
+            let key = group_key(&value);
+            match buckets.get_mut(&key) {
+                Some(entry) => entry.1 += 1,
+                None => {
+                    order.push(key.clone());
+                    buckets.insert(key, (value, 1));
+                }
+            }
+        }
+
+        let mut rows: Vec<BTreeMap<String, Value>> = order
+            .into_iter()
+            .map(|k| {
+                let (value, count) = buckets.remove(&k).unwrap();
+                let mut row = BTreeMap::new();
+                row.insert(field.to_string(), value);
+                row.insert("count".into(), Value::Int(count as i64));
+                row
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            let ca = match a.get("count") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            let cb = match b.get("count") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            };
+            cb.cmp(&ca)
+                .then_with(|| order_cmp(a.get(field), b.get(field)))
+        });
+
+        Ok(QueryResult::Rows(rows))
+    }
+
     fn exec_graph_components(&self, table: &str) -> Result<QueryResult> {
         let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
         // Connectivity ignores weights, so use the key-only edge scan that
@@ -734,6 +909,116 @@ impl<'s> QueryExecutor<'s> {
             largest,
             nodes,
         })
+    }
+
+    // -------------------------------------------------------------------
+    // Graph analytics verbs
+    // -------------------------------------------------------------------
+
+    /// `GRAPH PAGERANK <table>`: weighted PageRank over the edge table,
+    /// returning `{id, score}` rows sorted by score descending.
+    fn exec_graph_pagerank(
+        &self,
+        table: &str,
+        damping: f64,
+        max_iterations: usize,
+        limit: Option<u64>,
+    ) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_outgoing()?;
+        let opts = PageRankOptions {
+            damping,
+            max_iterations,
+            ..PageRankOptions::default()
+        };
+        let ranked = pagerank(&edges, &opts);
+        Ok(QueryResult::Rows(rank_rows(ranked, limit)))
+    }
+
+    /// `GRAPH CENTRALITY <table>`: degree centrality over the edge table,
+    /// returning `{id, score}` rows sorted by score descending.
+    fn exec_graph_centrality(
+        &self,
+        table: &str,
+        mode: CentralityMode,
+        limit: Option<u64>,
+    ) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_edges()?;
+        let kind = match mode {
+            CentralityMode::Degree => CentralityKind::Degree,
+            CentralityMode::InDegree => CentralityKind::InDegree,
+            CentralityMode::OutDegree => CentralityKind::OutDegree,
+        };
+        let ranked = degree_centrality(&edges, kind);
+        Ok(QueryResult::Rows(rank_rows(ranked, limit)))
+    }
+
+    /// `GRAPH PATH <src> -> <dst> ON <table>`: a single row describing the
+    /// shortest directed path (`found`, `length`, `path`).
+    fn exec_graph_path(
+        &self,
+        src: &str,
+        dst: &str,
+        table: &str,
+        max_depth: Option<usize>,
+    ) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_edges()?;
+        let mut row = BTreeMap::new();
+        match shortest_path(&edges, src, dst, max_depth) {
+            Some(nodes) => {
+                row.insert("found".into(), Value::Bool(true));
+                row.insert(
+                    "length".into(),
+                    Value::Int(nodes.len().saturating_sub(1) as i64),
+                );
+                row.insert(
+                    "path".into(),
+                    Value::Array(nodes.into_iter().map(Value::String).collect()),
+                );
+            }
+            None => {
+                row.insert("found".into(), Value::Bool(false));
+                row.insert("length".into(), Value::Int(-1));
+                row.insert("path".into(), Value::Array(Vec::new()));
+            }
+        }
+        Ok(QueryResult::Rows(vec![row]))
+    }
+
+    /// `GRAPH EDGES <table> [WHERE clause]`: list outgoing edges as rows of
+    /// `{src, dst, edge_type, weight, ...properties}`. The optional WHERE is
+    /// evaluated against each synthetic edge row, so `src`, `dst`, `weight`,
+    /// and any edge property can be filtered.
+    fn exec_graph_edges(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
+        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let edges = store.scan_all_outgoing_edges()?;
+        let mut rows = Vec::with_capacity(edges.len());
+        for edge in edges {
+            let mut fields = edge.properties;
+            let weight = match fields.get("weight") {
+                Some(Value::Float(f)) => *f,
+                Some(Value::Int(n)) => *n as f64,
+                _ => 1.0,
+            };
+            fields.insert("src".into(), Value::String(edge.src));
+            fields.insert("dst".into(), Value::String(edge.dst));
+            fields.insert("edge_type".into(), Value::String(edge.edge_type));
+            fields.insert("weight".into(), Value::Float(weight));
+
+            if let Some(clause) = filter {
+                let mut doc = Document::new(RecordId::generate(table));
+                doc.fields = fields;
+                if !matches_where(&doc, clause) {
+                    continue;
+                }
+                rows.push(doc.fields);
+            } else {
+                rows.push(fields);
+            }
+        }
+        Ok(QueryResult::Rows(rows))
     }
 
     // -------------------------------------------------------------------
@@ -895,6 +1180,42 @@ impl<'s> QueryExecutor<'s> {
             self.commit_search()?;
         }
         Ok(QueryResult::Deleted { existed })
+    }
+
+    /// `DELETE <table> [WHERE clause]`: delete every matching row, maintaining
+    /// secondary, full-text, and vector indexes. With no filter, deletes all
+    /// rows in the table.
+    fn exec_delete_where(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
+        let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
+        // Narrow candidates by index when the filter allows; otherwise scan.
+        let docs = match filter.and_then(|c| plan_index_lookup(coll.indexes(), c)) {
+            Some(plan) => {
+                let ids = run_index_plan(&coll, &plan)?;
+                coll.get_many(&ids)?
+            }
+            None => coll.scan_all()?,
+        };
+
+        let services_on = self.services.is_some();
+        let mut count = 0usize;
+        for doc in &docs {
+            if let Some(clause) = filter
+                && !matches_where(doc, clause)
+            {
+                continue;
+            }
+            let id = &doc.id.id;
+            if coll.delete(id)? {
+                count += 1;
+                if services_on {
+                    self.maintain_search_indexes(table, id, None, coll.indexes())?;
+                }
+            }
+        }
+        if services_on && count > 0 {
+            self.commit_search()?;
+        }
+        Ok(QueryResult::DeletedMany { count })
     }
 
     // -------------------------------------------------------------------
@@ -1090,13 +1411,15 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Ok)
     }
 
-    /// `SEARCH <table> <field> '<query>' [LIMIT n]`: BM25 full-text search,
-    /// returning matching documents in rank order, each with a `score` field.
+    /// `SEARCH <table> <field> '<query>' [WHERE clause] [LIMIT n]`: BM25
+    /// full-text search, returning matching documents in rank order with a
+    /// `score` field. An optional WHERE post-filters the ranked hits.
     fn exec_search(
         &self,
         table: &str,
         field: &str,
         query: &str,
+        filter: Option<&WhereClause>,
         limit: Option<u64>,
     ) -> Result<QueryResult> {
         let services = self.require_services()?;
@@ -1108,18 +1431,20 @@ impl<'s> QueryExecutor<'s> {
         }
 
         let limit = limit.map(|n| n as usize).unwrap_or(DEFAULT_SEARCH_LIMIT);
-        let hits = services.fts_search(table, field, query, limit)?;
-        self.rows_from_hits(table, hits, "score")
+        let fetch = candidate_pool(limit, filter.is_some());
+        let hits = services.fts_search(table, field, query, fetch)?;
+        self.rows_from_hits(table, hits, filter, limit, "score")
     }
 
-    /// `VECTOR SEARCH <table> <field> [..] [K n]`: approximate KNN search,
-    /// returning nearest documents in distance order, each with a `distance`
-    /// field.
+    /// `VECTOR SEARCH <table> <field> [..] [WHERE clause] [K n]`: approximate
+    /// KNN search, returning nearest documents in distance order with a
+    /// `distance` field. An optional WHERE post-filters the ranked hits.
     fn exec_vector_search(
         &self,
         table: &str,
         field: &str,
         vector: &[f64],
+        filter: Option<&WhereClause>,
         k: Option<u64>,
     ) -> Result<QueryResult> {
         let services = self.require_services()?;
@@ -1132,17 +1457,22 @@ impl<'s> QueryExecutor<'s> {
 
         let query: Vec<f32> = vector.iter().map(|f| *f as f32).collect();
         let k = k.map(|n| n as usize).unwrap_or(DEFAULT_SEARCH_LIMIT);
-        let hits = services.vector_search(&def.name, &query, k)?;
-        self.rows_from_hits(table, hits, "distance")
+        let fetch = candidate_pool(k, filter.is_some());
+        let hits = services.vector_search(&def.name, &query, fetch)?;
+        self.rows_from_hits(table, hits, filter, k, "distance")
     }
 
     /// Resolve ranked `(id, metric)` hits to full document rows, preserving
-    /// rank order and attaching the metric under `score_field`. Hits whose
-    /// document no longer exists are skipped.
+    /// rank order and attaching the metric under `score_field`. An optional
+    /// residual `filter` is applied to each resolved document, and at most
+    /// `limit` rows are returned. Hits whose document is missing or fails the
+    /// filter are skipped.
     fn rows_from_hits(
         &self,
         table: &str,
         hits: Vec<(String, f32)>,
+        filter: Option<&WhereClause>,
+        limit: usize,
         score_field: &str,
     ) -> Result<QueryResult> {
         let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
@@ -1151,13 +1481,112 @@ impl<'s> QueryExecutor<'s> {
         let by_id: HashMap<String, Document> =
             docs.into_iter().map(|d| (d.id.id.clone(), d)).collect();
 
-        let mut rows = Vec::with_capacity(hits.len());
+        let mut rows = Vec::new();
         for (id, score) in hits {
-            if let Some(doc) = by_id.get(&id) {
-                let mut row = doc.fields.clone();
-                row.insert("id".into(), Value::String(format!("{table}:{id}")));
-                row.insert(score_field.into(), Value::Float(score as f64));
-                rows.push(row);
+            let Some(doc) = by_id.get(&id) else {
+                continue;
+            };
+            if let Some(clause) = filter
+                && !matches_where(doc, clause)
+            {
+                continue;
+            }
+            let mut row = doc.fields.clone();
+            row.insert("id".into(), Value::String(format!("{table}:{id}")));
+            row.insert(score_field.into(), Value::Float(score as f64));
+            rows.push(row);
+            if rows.len() >= limit {
+                break;
+            }
+        }
+        Ok(QueryResult::Rows(rows))
+    }
+
+    /// `HYBRID SEARCH`: fuse normalized BM25 and vector scores with weight
+    /// `alpha` on the text score (the vector score gets `1 - alpha`).
+    /// Over-fetches from both indexes, blends over the union of candidate ids,
+    /// applies the optional residual filter, and returns the top rows with
+    /// `score`, `text_score`, and `vector_score` fields.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_hybrid_search(
+        &self,
+        table: &str,
+        text_field: &str,
+        query: &str,
+        vector_field: &str,
+        vector: &[f64],
+        alpha: Option<f64>,
+        filter: Option<&WhereClause>,
+        limit: Option<u64>,
+    ) -> Result<QueryResult> {
+        let services = self.require_services()?;
+
+        let text_def = self.find_search_index(table, text_field, SearchKind::FullText)?;
+        if let IndexKind::FullText { analyzer } = &text_def.kind {
+            services.ensure_fulltext(table, text_field, analyzer)?;
+        }
+        let vec_def = self.find_search_index(table, vector_field, SearchKind::Vector)?;
+        if let IndexKind::Vector { dim, metric } = &vec_def.kind {
+            self.ensure_vector_loaded(table, &vec_def, *dim, metric)?;
+        }
+
+        let alpha = alpha.unwrap_or(0.5).clamp(0.0, 1.0);
+        let limit = limit.map(|n| n as usize).unwrap_or(DEFAULT_SEARCH_LIMIT);
+        // Always over-fetch so the fused ranking sees enough candidates.
+        let fetch = candidate_pool(limit, true);
+
+        let text_hits = services.fts_search(table, text_field, query, fetch)?;
+        let qv: Vec<f32> = vector.iter().map(|f| *f as f32).collect();
+        let vec_hits = services.vector_search(&vec_def.name, &qv, fetch)?;
+
+        // Normalize each list independently to [0, 1].
+        let text_norm = normalize_scores(&text_hits, false);
+        let vec_norm = normalize_scores(&vec_hits, true);
+
+        // Blend over the union of candidate ids.
+        let mut blended: HashMap<String, (f64, f64)> = HashMap::new();
+        for (id, s) in text_norm {
+            blended.entry(id).or_insert((0.0, 0.0)).0 = s;
+        }
+        for (id, s) in vec_norm {
+            blended.entry(id).or_insert((0.0, 0.0)).1 = s;
+        }
+
+        let mut scored: Vec<(String, f64, f64, f64)> = blended
+            .into_iter()
+            .map(|(id, (t, v))| (id, alpha * t + (1.0 - alpha) * v, t, v))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        // Resolve documents, apply the residual filter, take the top rows.
+        let ids: Vec<String> = scored.iter().map(|(id, ..)| id.clone()).collect();
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        let docs = coll.get_many(&ids)?;
+        let by_id: HashMap<String, Document> =
+            docs.into_iter().map(|d| (d.id.id.clone(), d)).collect();
+
+        let mut rows = Vec::new();
+        for (id, score, text_score, vector_score) in scored {
+            let Some(doc) = by_id.get(&id) else {
+                continue;
+            };
+            if let Some(clause) = filter
+                && !matches_where(doc, clause)
+            {
+                continue;
+            }
+            let mut row = doc.fields.clone();
+            row.insert("id".into(), Value::String(format!("{table}:{id}")));
+            row.insert("score".into(), Value::Float(score));
+            row.insert("text_score".into(), Value::Float(text_score));
+            row.insert("vector_score".into(), Value::Float(vector_score));
+            rows.push(row);
+            if rows.len() >= limit {
+                break;
             }
         }
         Ok(QueryResult::Rows(rows))
@@ -1313,6 +1742,114 @@ fn algo_str(algo: &crate::ast::CommunityAlgorithm) -> &'static str {
     match algo {
         crate::ast::CommunityAlgorithm::Louvain => "louvain",
         crate::ast::CommunityAlgorithm::LabelPropagation => "lp",
+    }
+}
+
+/// Map a `CentralityMode` to the string used in cache keys.
+#[inline]
+fn centrality_mode_str(mode: &CentralityMode) -> &'static str {
+    match mode {
+        CentralityMode::Degree => "degree",
+        CentralityMode::InDegree => "indegree",
+        CentralityMode::OutDegree => "outdegree",
+    }
+}
+
+/// Build `{id, score}` rows from a ranked node list, truncated to `limit`.
+fn rank_rows(ranked: Vec<(String, f64)>, limit: Option<u64>) -> Vec<BTreeMap<String, Value>> {
+    let cap = limit.map(|n| n as usize).unwrap_or(usize::MAX);
+    ranked
+        .into_iter()
+        .take(cap)
+        .map(|(id, score)| {
+            let mut row = BTreeMap::new();
+            row.insert("id".into(), Value::String(id));
+            row.insert("score".into(), Value::Float(score));
+            row
+        })
+        .collect()
+}
+
+/// Number of ranked candidates to fetch from a search service. When a residual
+/// filter will prune ranked hits, over-fetch by a fixed factor so the
+/// post-filtered top-N is still well populated.
+fn candidate_pool(limit: usize, filtered: bool) -> usize {
+    const EXPANSION: usize = 10;
+    if filtered {
+        limit.saturating_mul(EXPANSION).max(limit)
+    } else {
+        limit
+    }
+}
+
+/// Min-max normalize hit scores to `[0, 1]`. When `lower_is_better` (e.g.
+/// vector distances) scores are negated first so higher always means more
+/// relevant. An all-equal score set normalizes to 1.0.
+fn normalize_scores(hits: &[(String, f32)], lower_is_better: bool) -> Vec<(String, f64)> {
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    let goodness: Vec<f64> = hits
+        .iter()
+        .map(|(_, s)| {
+            if lower_is_better {
+                -(*s as f64)
+            } else {
+                *s as f64
+            }
+        })
+        .collect();
+    let min = goodness.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = goodness.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    hits.iter()
+        .zip(goodness)
+        .map(|((id, _), g)| {
+            let n = if range > 0.0 { (g - min) / range } else { 1.0 };
+            (id.clone(), n)
+        })
+        .collect()
+}
+
+/// A stable string key for grouping documents by a `Value` (used by
+/// `COUNT ... GROUP BY`). Missing and `None` values share one bucket.
+fn group_key(v: &Value) -> String {
+    match v {
+        Value::None => "\u{0}none".into(),
+        Value::Bool(b) => format!("b:{b}"),
+        Value::Int(n) => format!("i:{n}"),
+        Value::Float(f) => format!("f:{}", f.to_bits()),
+        Value::String(s) => format!("s:{s}"),
+        other => format!("o:{other:?}"),
+    }
+}
+
+/// Sort documents in place by the given ORDER BY keys (first key is primary).
+fn sort_documents(docs: &mut [Document], keys: &[OrderKey]) {
+    docs.sort_by(|a, b| {
+        for key in keys {
+            let ord = order_cmp(a.fields.get(&key.field), b.fields.get(&key.field));
+            let ord = if key.descending { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+/// Compare two optional field values for ordering. Missing and `None` values
+/// sort after all present values; otherwise [`cmp_values`] decides (with
+/// incomparable types treated as equal).
+fn order_cmp(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a_set = a.is_some_and(|v| !v.is_none());
+    let b_set = b.is_some_and(|v| !v.is_none());
+    match (a_set, b_set) {
+        (false, false) => Ordering::Equal,
+        (false, true) => Ordering::Greater,
+        (true, false) => Ordering::Less,
+        (true, true) => cmp_values(a.unwrap(), b.unwrap()).unwrap_or(Ordering::Equal),
     }
 }
 

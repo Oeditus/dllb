@@ -1883,3 +1883,323 @@ fn search_ddl_and_verbs_error_without_services() {
     e.run("CREATE doc:a SET body = 'hi';").unwrap();
     assert!(e.run("DEFINE INDEX by_body ON doc FIELDS body").is_ok());
 }
+
+// -------------------------------------------------------------------
+// ORDER BY / top-N
+// -------------------------------------------------------------------
+
+/// The `id` field of a row as a string (works for both `table:id` SELECT rows
+/// and bare-id graph rows).
+fn id_of(row: &std::collections::BTreeMap<String, Value>) -> &str {
+    match row.get("id") {
+        Some(Value::String(s)) => s.as_str(),
+        other => panic!("expected string id, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_order_by_desc_with_limit_is_top_n() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE u:a SET score = 10;").unwrap();
+    e.run("CREATE u:b SET score = 30;").unwrap();
+    e.run("CREATE u:c SET score = 20;").unwrap();
+
+    let rows = rows_of(
+        e.run("SELECT * FROM u ORDER BY score DESC LIMIT 2;")
+            .unwrap()
+            .0,
+    );
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert_eq!(id_of(&rows[0]), "u:b");
+    assert_eq!(id_of(&rows[1]), "u:c");
+}
+
+#[test]
+fn select_order_by_ascending_is_default() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE u:a SET score = 10;").unwrap();
+    e.run("CREATE u:b SET score = 30;").unwrap();
+    e.run("CREATE u:c SET score = 20;").unwrap();
+
+    let rows = rows_of(e.run("SELECT * FROM u ORDER BY score;").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _, _]));
+    assert_eq!(id_of(&rows[0]), "u:a");
+    assert_eq!(id_of(&rows[2]), "u:b");
+}
+
+// -------------------------------------------------------------------
+// COUNT ... GROUP BY
+// -------------------------------------------------------------------
+
+#[test]
+fn count_group_by_buckets_sorted_by_count() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE n:a SET lang = 'rust';").unwrap();
+    e.run("CREATE n:b SET lang = 'rust';").unwrap();
+    e.run("CREATE n:c SET lang = 'go';").unwrap();
+
+    let rows = rows_of(e.run("COUNT n GROUP BY lang;").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert_eq!(rows[0].get("lang"), Some(&Value::String("rust".into())));
+    assert_eq!(rows[0].get("count"), Some(&Value::Int(2)));
+    assert_eq!(rows[1].get("lang"), Some(&Value::String("go".into())));
+    assert_eq!(rows[1].get("count"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn count_group_by_with_where_filters_first() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE n:a SET lang = 'rust', kind = 'fn';").unwrap();
+    e.run("CREATE n:b SET lang = 'rust', kind = 'struct';")
+        .unwrap();
+    e.run("CREATE n:c SET lang = 'go', kind = 'fn';").unwrap();
+
+    let rows = rows_of(e.run("COUNT n WHERE kind = 'fn' GROUP BY lang;").unwrap().0);
+    // Only 'fn' rows counted: rust=1, go=1.
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert!(rows.iter().all(|r| r.get("count") == Some(&Value::Int(1))));
+}
+
+// -------------------------------------------------------------------
+// DELETE ... WHERE
+// -------------------------------------------------------------------
+
+#[test]
+fn delete_where_removes_matching_rows() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE n:a SET file = 'x.rs';").unwrap();
+    e.run("CREATE n:b SET file = 'x.rs';").unwrap();
+    e.run("CREATE n:c SET file = 'y.rs';").unwrap();
+
+    let (res, _) = e.run("DELETE n WHERE file = 'x.rs';").unwrap();
+    assert!(matches!(res, QueryResult::DeletedMany { count: 2 }));
+    assert_eq!(count_value(e.run("COUNT n;").unwrap().0), 1);
+}
+
+#[test]
+fn delete_where_maintains_secondary_index() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("DEFINE INDEX by_file ON n FIELDS file;").unwrap();
+    e.run("CREATE n:a SET file = 'x.rs';").unwrap();
+    e.run("CREATE n:b SET file = 'y.rs';").unwrap();
+
+    e.run("DELETE n WHERE file = 'x.rs';").unwrap();
+    // Index-accelerated lookups must reflect the deletion.
+    assert_eq!(
+        count_value(e.run("COUNT n WHERE file = 'x.rs';").unwrap().0),
+        0
+    );
+    assert_eq!(
+        count_value(e.run("COUNT n WHERE file = 'y.rs';").unwrap().0),
+        1
+    );
+}
+
+#[test]
+fn delete_where_maintains_fulltext_index() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+    e.run("CREATE doc:a SET body = 'alpha', project = 'p1';")
+        .unwrap();
+    e.run("CREATE doc:b SET body = 'alpha', project = 'p2';")
+        .unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+
+    e.run("DELETE doc WHERE project = 'p1';").unwrap();
+    // The deleted doc must drop out of full-text results.
+    let rows = rows_of(e.run("SEARCH doc body 'alpha'").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(row_id(&rows[0]), "doc:b");
+}
+
+// -------------------------------------------------------------------
+// Filtered SEARCH / VECTOR SEARCH
+// -------------------------------------------------------------------
+
+#[test]
+fn search_with_where_scopes_results() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+    e.run("CREATE doc:a SET body = 'quick fox', project = 'p1';")
+        .unwrap();
+    e.run("CREATE doc:b SET body = 'quick fox', project = 'p2';")
+        .unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+
+    // Unfiltered: both match.
+    assert!(matches!(
+        rows_of(e.run("SEARCH doc body 'quick'").unwrap().0).as_slice(),
+        [_, _]
+    ));
+    // Scoped by project: only p1.
+    let rows = rows_of(
+        e.run("SEARCH doc body 'quick' WHERE project = 'p1'")
+            .unwrap()
+            .0,
+    );
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(row_id(&rows[0]), "doc:a");
+}
+
+#[test]
+fn vector_search_with_where_scopes_results() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+    e.run("CREATE pt:a SET emb = [1.0, 0.0], project = 'p1';")
+        .unwrap();
+    e.run("CREATE pt:b SET emb = [0.9, 0.1], project = 'p2';")
+        .unwrap();
+    e.run("DEFINE VECTOR INDEX vec ON pt FIELDS emb DIMENSION 2;")
+        .unwrap();
+
+    // Nearest to (1,0) is pt:a, but the filter scopes to p2 -> pt:b.
+    let rows = rows_of(
+        e.run("VECTOR SEARCH pt emb [1.0, 0.0] WHERE project = 'p2' K 5")
+            .unwrap()
+            .0,
+    );
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(row_id(&rows[0]), "pt:b");
+}
+
+// -------------------------------------------------------------------
+// Graph analytics: PAGERANK / CENTRALITY / PATH / EDGES
+// -------------------------------------------------------------------
+
+#[test]
+fn graph_pagerank_ranks_hub_highest() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    // b, c, d all call a -> a is the most referenced node.
+    e.run("RELATE fn:b->calls->fn:a;").unwrap();
+    e.run("RELATE fn:c->calls->fn:a;").unwrap();
+    e.run("RELATE fn:d->calls->fn:a;").unwrap();
+
+    let rows = rows_of(e.run("GRAPH PAGERANK calls;").unwrap().0);
+    assert_eq!(id_of(&rows[0]), "a");
+
+    // LIMIT yields just the top node.
+    let rows = rows_of(e.run("GRAPH PAGERANK calls LIMIT 1;").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(id_of(&rows[0]), "a");
+}
+
+#[test]
+fn graph_centrality_in_and_out_degree() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("RELATE fn:a->calls->fn:c;").unwrap();
+    e.run("RELATE fn:b->calls->fn:c;").unwrap();
+
+    // In-degree: c is called twice.
+    let rows = rows_of(e.run("GRAPH CENTRALITY calls INDEGREE LIMIT 1;").unwrap().0);
+    assert_eq!(id_of(&rows[0]), "c");
+    assert_eq!(rows[0].get("score"), Some(&Value::Float(2.0)));
+
+    // Out-degree: callers have out-degree 1, c has 0.
+    let rows = rows_of(
+        e.run("GRAPH CENTRALITY calls OUTDEGREE LIMIT 1;")
+            .unwrap()
+            .0,
+    );
+    assert_eq!(rows[0].get("score"), Some(&Value::Float(1.0)));
+}
+
+#[test]
+fn graph_path_shortest_and_unreachable() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("RELATE fn:a->calls->fn:b;").unwrap();
+    e.run("RELATE fn:b->calls->fn:c;").unwrap();
+
+    let rows = rows_of(e.run("GRAPH PATH a -> c ON calls;").unwrap().0);
+    assert_eq!(rows[0].get("found"), Some(&Value::Bool(true)));
+    assert_eq!(rows[0].get("length"), Some(&Value::Int(2)));
+    match rows[0].get("path") {
+        Some(Value::Array(p)) => assert!(matches!(p.as_slice(), [_, _, _])),
+        other => panic!("expected path array, got {other:?}"),
+    }
+
+    // Directed: c cannot reach a.
+    let rows = rows_of(e.run("GRAPH PATH c -> a ON calls;").unwrap().0);
+    assert_eq!(rows[0].get("found"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn graph_edges_lists_weights_and_filters() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("RELATE fn:a->calls->fn:b SET weight = 2.5;").unwrap();
+    e.run("RELATE fn:a->calls->fn:c;").unwrap(); // default weight 1.0
+
+    let rows = rows_of(e.run("GRAPH EDGES calls;").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert!(
+        rows.iter()
+            .all(|r| r.contains_key("src") && r.contains_key("dst") && r.contains_key("weight"))
+    );
+
+    // Filter on the synthetic weight column.
+    let rows = rows_of(e.run("GRAPH EDGES calls WHERE weight > 1.0;").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(rows[0].get("dst"), Some(&Value::String("b".into())));
+    assert_eq!(rows[0].get("weight"), Some(&Value::Float(2.5)));
+}
+
+// -------------------------------------------------------------------
+// HYBRID SEARCH
+// -------------------------------------------------------------------
+
+#[test]
+fn hybrid_search_alpha_extremes_favor_each_modality() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+    // doc:a wins on text ('quick'); doc:b wins on the vector query ([0,1]).
+    e.run("CREATE doc:a SET body = 'quick brown fox', emb = [1.0, 0.0];")
+        .unwrap();
+    e.run("CREATE doc:b SET body = 'lazy dog', emb = [0.0, 1.0];")
+        .unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+    e.run("DEFINE VECTOR INDEX vec ON doc FIELDS emb DIMENSION 2;")
+        .unwrap();
+
+    // alpha = 1.0 -> pure text relevance.
+    let rows = rows_of(
+        e.run("HYBRID SEARCH doc TEXT body 'quick' VECTOR emb [0.0, 1.0] ALPHA 1.0;")
+            .unwrap()
+            .0,
+    );
+    assert_eq!(row_id(&rows[0]), "doc:a");
+    assert!(
+        rows[0].contains_key("score")
+            && rows[0].contains_key("text_score")
+            && rows[0].contains_key("vector_score")
+    );
+
+    // alpha = 0.0 -> pure vector similarity.
+    let rows = rows_of(
+        e.run("HYBRID SEARCH doc TEXT body 'quick' VECTOR emb [0.0, 1.0] ALPHA 0.0;")
+            .unwrap()
+            .0,
+    );
+    assert_eq!(row_id(&rows[0]), "doc:b");
+}
+
+#[test]
+fn hybrid_search_errors_without_services() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    assert!(
+        e.run("HYBRID SEARCH doc TEXT body 'x' VECTOR emb [1.0, 2.0]")
+            .is_err()
+    );
+}

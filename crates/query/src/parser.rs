@@ -45,6 +45,7 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("VECTOR") => {
             parse_vector_search(tokens, pos)
         }
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("HYBRID") => parse_hybrid(tokens, pos),
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
     }
@@ -130,8 +131,10 @@ fn parse_define_vector(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
 }
 
 // -----------------------------------------------------------------------
-// SEARCH <table> <field> '<query>' [LIMIT n]
-// VECTOR SEARCH <table> <field> [v1, v2, ...] [K n]
+// SEARCH <table> <field> '<query>' [WHERE clause] [LIMIT n]
+// VECTOR SEARCH <table> <field> [v1, v2, ...] [WHERE clause] [K n]
+// HYBRID SEARCH <table> TEXT <field> '<q>' VECTOR <field> [..]
+//        [ALPHA f] [WHERE clause] [LIMIT n]
 // -----------------------------------------------------------------------
 
 fn parse_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
@@ -139,11 +142,13 @@ fn parse_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     let table = expect_ident(tokens, pos)?;
     let field = expect_ident(tokens, pos)?;
     let query = expect_string(tokens, pos)?;
+    let filter = parse_where_clause(tokens, pos)?;
     let limit = parse_limit(tokens, pos)?;
     Ok(Statement::Search {
         table,
         field,
         query,
+        filter,
         limit,
     })
 }
@@ -153,9 +158,54 @@ fn parse_vector_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect_keyword(tokens, pos, "SEARCH")?;
     let table = expect_ident(tokens, pos)?;
     let field = expect_ident(tokens, pos)?;
+    let vector = parse_vector_literal(tokens, pos)?;
+    let filter = parse_where_clause(tokens, pos)?;
+    let k = if consume_keyword(tokens, pos, "K") {
+        Some(expect_positive_int(tokens, pos, "K")?)
+    } else {
+        None
+    };
+    Ok(Statement::VectorSearch {
+        table,
+        field,
+        vector,
+        filter,
+        k,
+    })
+}
 
-    // The query vector is an array literal of numbers.
-    let vector = match parse_literal(tokens, pos)? {
+fn parse_hybrid(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "HYBRID")?;
+    expect_keyword(tokens, pos, "SEARCH")?;
+    let table = expect_ident(tokens, pos)?;
+    expect_keyword(tokens, pos, "TEXT")?;
+    let text_field = expect_ident(tokens, pos)?;
+    let query = expect_string(tokens, pos)?;
+    expect_keyword(tokens, pos, "VECTOR")?;
+    let vector_field = expect_ident(tokens, pos)?;
+    let vector = parse_vector_literal(tokens, pos)?;
+    let alpha = if consume_keyword(tokens, pos, "ALPHA") {
+        Some(expect_number(tokens, pos, "ALPHA")?)
+    } else {
+        None
+    };
+    let filter = parse_where_clause(tokens, pos)?;
+    let limit = parse_limit(tokens, pos)?;
+    Ok(Statement::HybridSearch {
+        table,
+        text_field,
+        query,
+        vector_field,
+        vector,
+        alpha,
+        filter,
+        limit,
+    })
+}
+
+/// Parse a numeric array literal `[..]` into `Vec<f64>` (ints coerce to f64).
+fn parse_vector_literal(tokens: &[Token], pos: &mut usize) -> Result<Vec<f64>> {
+    match parse_literal(tokens, pos)? {
         Literal::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for it in items {
@@ -169,26 +219,12 @@ fn parse_vector_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
                     }
                 }
             }
-            out
+            Ok(out)
         }
-        other => {
-            return Err(Error::Query(format!(
-                "expected a vector literal [..], got {other:?}"
-            )));
-        }
-    };
-
-    let k = if consume_keyword(tokens, pos, "K") {
-        Some(expect_positive_int(tokens, pos, "K")?)
-    } else {
-        None
-    };
-    Ok(Statement::VectorSearch {
-        table,
-        field,
-        vector,
-        k,
-    })
+        other => Err(Error::Query(format!(
+            "expected a vector literal [..], got {other:?}"
+        ))),
+    }
 }
 
 /// Parse `ON [TABLE] <table>` and return the table name.
@@ -274,12 +310,14 @@ fn parse_select(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     };
 
     let filter = parse_where_clause(tokens, pos)?;
+    let order_by = parse_order_by(tokens, pos)?;
     let limit = parse_limit(tokens, pos)?;
 
     Ok(Statement::Select {
         fields,
         from,
         filter,
+        order_by,
         limit,
     })
 }
@@ -387,9 +425,16 @@ fn parse_traversal_chain(tokens: &[Token], pos: &mut usize) -> Result<TraversalC
 fn parse_delete(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Delete)?;
     let table = expect_ident(tokens, pos)?;
-    expect(tokens, pos, &Token::Colon)?;
-    let id = expect_ident(tokens, pos)?;
-    Ok(Statement::Delete { table, id })
+    // `DELETE table:id` is a point delete; `DELETE table [WHERE ...]` deletes
+    // every matching row.
+    if matches!(tokens.get(*pos), Some(Token::Colon)) {
+        *pos += 1;
+        let id = expect_ident(tokens, pos)?;
+        Ok(Statement::Delete { table, id })
+    } else {
+        let filter = parse_where_clause(tokens, pos)?;
+        Ok(Statement::DeleteWhere { table, filter })
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -428,7 +473,21 @@ fn parse_count(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Count)?;
     let table = expect_ident(tokens, pos)?;
     let filter = parse_where_clause(tokens, pos)?;
-    Ok(Statement::Count { table, filter })
+    let group_by = parse_group_by(tokens, pos)?;
+    Ok(Statement::Count {
+        table,
+        filter,
+        group_by,
+    })
+}
+
+/// Parse an optional `GROUP BY <field>` clause.
+fn parse_group_by(tokens: &[Token], pos: &mut usize) -> Result<Option<String>> {
+    if !consume_keyword(tokens, pos, "GROUP") {
+        return Ok(None);
+    }
+    expect_keyword(tokens, pos, "BY")?;
+    Ok(Some(expect_ident(tokens, pos)?))
 }
 
 // -----------------------------------------------------------------------
@@ -440,11 +499,94 @@ fn parse_graph(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     match tokens.get(*pos) {
         Some(Token::Communities) => parse_graph_communities(tokens, pos),
         Some(Token::Components) => parse_graph_components(tokens, pos),
+        // Analytics verbs are contextual idents, not reserved tokens.
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("PAGERANK") => {
+            parse_graph_pagerank(tokens, pos)
+        }
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("CENTRALITY") => {
+            parse_graph_centrality(tokens, pos)
+        }
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("PATH") => parse_graph_path(tokens, pos),
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("EDGES") => {
+            parse_graph_edges(tokens, pos)
+        }
         Some(t) => Err(Error::Query(format!(
-            "expected COMMUNITIES or COMPONENTS after GRAPH, got {t:?}"
+            "expected COMMUNITIES, COMPONENTS, PAGERANK, CENTRALITY, PATH, or EDGES after GRAPH, got {t:?}"
         ))),
         None => Err(Error::Query("unexpected end of input after GRAPH".into())),
     }
+}
+
+// -----------------------------------------------------------------------
+// GRAPH PAGERANK <table> [DAMPING f] [MAX_ITER n] [LIMIT n]
+// GRAPH CENTRALITY <table> [DEGREE|INDEGREE|OUTDEGREE] [LIMIT n]
+// GRAPH PATH <src> -> <dst> ON <table> [MAX_DEPTH n]
+// GRAPH EDGES <table> [WHERE clause]
+// -----------------------------------------------------------------------
+
+fn parse_graph_pagerank(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "PAGERANK")?;
+    let table = expect_ident(tokens, pos)?;
+    let mut damping = 0.85;
+    let mut max_iterations = 100usize;
+    loop {
+        if consume_keyword(tokens, pos, "DAMPING") {
+            damping = expect_number(tokens, pos, "DAMPING")?;
+        } else if consume_keyword(tokens, pos, "MAX_ITER") {
+            max_iterations = expect_positive_int(tokens, pos, "MAX_ITER")? as usize;
+        } else {
+            break;
+        }
+    }
+    let limit = parse_limit(tokens, pos)?;
+    Ok(Statement::GraphPagerank {
+        table,
+        damping,
+        max_iterations,
+        limit,
+    })
+}
+
+fn parse_graph_centrality(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "CENTRALITY")?;
+    let table = expect_ident(tokens, pos)?;
+    let mode = if consume_keyword(tokens, pos, "INDEGREE") {
+        CentralityMode::InDegree
+    } else if consume_keyword(tokens, pos, "OUTDEGREE") {
+        CentralityMode::OutDegree
+    } else {
+        consume_keyword(tokens, pos, "DEGREE"); // optional explicit default
+        CentralityMode::Degree
+    };
+    let limit = parse_limit(tokens, pos)?;
+    Ok(Statement::GraphCentrality { table, mode, limit })
+}
+
+fn parse_graph_path(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "PATH")?;
+    let src = expect_ident(tokens, pos)?;
+    expect(tokens, pos, &Token::Arrow)?;
+    let dst = expect_ident(tokens, pos)?;
+    expect(tokens, pos, &Token::On)?;
+    let table = expect_ident(tokens, pos)?;
+    let max_depth = if consume_keyword(tokens, pos, "MAX_DEPTH") {
+        Some(expect_positive_int(tokens, pos, "MAX_DEPTH")? as usize)
+    } else {
+        None
+    };
+    Ok(Statement::GraphPath {
+        src,
+        dst,
+        table,
+        max_depth,
+    })
+}
+
+fn parse_graph_edges(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "EDGES")?;
+    let table = expect_ident(tokens, pos)?;
+    let filter = parse_where_clause(tokens, pos)?;
+    Ok(Statement::GraphEdges { table, filter })
 }
 
 // -----------------------------------------------------------------------
@@ -852,6 +994,54 @@ fn expect_positive_int(tokens: &[Token], pos: &mut usize, what: &str) -> Result<
     }
 }
 
+/// Parse an optional `ORDER BY <field> [ASC|DESC] (, ...)*` clause.
+fn parse_order_by(tokens: &[Token], pos: &mut usize) -> Result<Vec<OrderKey>> {
+    if !consume_keyword(tokens, pos, "ORDER") {
+        return Ok(Vec::new());
+    }
+    expect_keyword(tokens, pos, "BY")?;
+    let mut keys = vec![parse_order_key(tokens, pos)?];
+    while matches!(tokens.get(*pos), Some(Token::Comma)) {
+        *pos += 1;
+        keys.push(parse_order_key(tokens, pos)?);
+    }
+    Ok(keys)
+}
+
+fn parse_order_key(tokens: &[Token], pos: &mut usize) -> Result<OrderKey> {
+    let field = expect_ident(tokens, pos)?;
+    let descending = if consume_keyword(tokens, pos, "DESC") {
+        true
+    } else {
+        consume_keyword(tokens, pos, "ASC"); // optional, ascending is default
+        false
+    };
+    Ok(OrderKey { field, descending })
+}
+
+/// Expect a numeric literal (int or float), consuming it. `what` names the
+/// clause for error messages.
+fn expect_number(tokens: &[Token], pos: &mut usize, what: &str) -> Result<f64> {
+    match tokens.get(*pos) {
+        Some(Token::FloatLit(f)) => {
+            let v = *f;
+            *pos += 1;
+            Ok(v)
+        }
+        Some(Token::IntLit(n)) => {
+            let v = *n as f64;
+            *pos += 1;
+            Ok(v)
+        }
+        Some(t) => Err(Error::Query(format!(
+            "{what} requires a numeric value, got {t:?}"
+        ))),
+        None => Err(Error::Query(format!(
+            "unexpected end of input, expected number for {what}"
+        ))),
+    }
+}
+
 /// Parse an optional `OUTCOME JSON|TOON|CSV` clause.
 fn parse_outcome(tokens: &[Token], pos: &mut usize) -> Result<OutcomeFormat> {
     if !matches!(tokens.get(*pos), Some(Token::Outcome)) {
@@ -958,6 +1148,7 @@ mod tests {
             fields: SelectFields::All,
             from: FromTarget::Table(t),
             filter: None,
+            order_by: _,
             limit: None,
         } if t == "user"));
     }
@@ -969,6 +1160,7 @@ mod tests {
                 fields: SelectFields::All,
                 from: FromTarget::Table(table),
                 filter: None,
+                order_by: _,
                 limit: Some(10),
             } => {
                 assert_eq!(table, "user");
@@ -1482,6 +1674,7 @@ mod tests {
                 table,
                 field,
                 query,
+                filter: None,
                 limit,
             } => {
                 assert_eq!(table, "article");
@@ -1511,6 +1704,7 @@ mod tests {
                 table,
                 field,
                 vector,
+                filter: None,
                 k,
             } => {
                 assert_eq!(table, "doc");
@@ -1551,6 +1745,253 @@ mod tests {
         assert!(matches!(
             stmt("SELECT * FROM doc WHERE vector = 1"),
             Statement::Select { .. }
+        ));
+    }
+
+    // -- ORDER BY / GROUP BY / DELETE WHERE / graph verbs / hybrid ------------
+
+    #[test]
+    fn parse_select_order_by_desc_then_limit() {
+        match stmt("SELECT * FROM user WHERE age > 1 ORDER BY age DESC, name LIMIT 5") {
+            Statement::Select {
+                order_by, limit, ..
+            } => {
+                assert!(matches!(order_by.as_slice(), [_, _]));
+                assert_eq!(order_by[0].field, "age");
+                assert!(order_by[0].descending);
+                assert_eq!(order_by[1].field, "name");
+                assert!(!order_by[1].descending);
+                assert_eq!(limit, Some(5));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_select_order_by_defaults_ascending() {
+        match stmt("SELECT * FROM user ORDER BY age") {
+            Statement::Select { order_by, .. } => {
+                assert!(matches!(order_by.as_slice(), [_]));
+                assert!(!order_by[0].descending);
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_select_without_order_is_empty() {
+        match stmt("SELECT * FROM user") {
+            Statement::Select { order_by, .. } => assert!(order_by.is_empty()),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_count_group_by() {
+        match stmt("COUNT node WHERE kind = 'fn' GROUP BY lang") {
+            Statement::Count {
+                table,
+                filter,
+                group_by,
+            } => {
+                assert_eq!(table, "node");
+                assert!(filter.is_some());
+                assert_eq!(group_by, Some("lang".into()));
+            }
+            _ => panic!("expected Count"),
+        }
+    }
+
+    #[test]
+    fn parse_count_plain_has_no_group() {
+        assert!(matches!(
+            stmt("COUNT node"),
+            Statement::Count { group_by: None, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_delete_point_lookup() {
+        match stmt("DELETE user:alice") {
+            Statement::Delete { table, id } => {
+                assert_eq!(table, "user");
+                assert_eq!(id, "alice");
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn parse_delete_where() {
+        match stmt("DELETE node WHERE file = 'a.rs'") {
+            Statement::DeleteWhere { table, filter } => {
+                assert_eq!(table, "node");
+                assert!(filter.is_some());
+            }
+            _ => panic!("expected DeleteWhere"),
+        }
+    }
+
+    #[test]
+    fn parse_delete_all_no_filter() {
+        assert!(matches!(
+            stmt("DELETE node"),
+            Statement::DeleteWhere { filter: None, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_search_with_where_and_limit() {
+        assert!(matches!(
+            stmt("SEARCH article body 'graph' WHERE lang = 'en' LIMIT 5"),
+            Statement::Search {
+                filter: Some(_),
+                limit: Some(5),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_vector_search_with_where() {
+        assert!(matches!(
+            stmt("VECTOR SEARCH doc emb [1.0, 2.0] WHERE project = 'p' K 3"),
+            Statement::VectorSearch {
+                filter: Some(_),
+                k: Some(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_graph_pagerank_options() {
+        match stmt("GRAPH PAGERANK calls DAMPING 0.9 MAX_ITER 50 LIMIT 10") {
+            Statement::GraphPagerank {
+                table,
+                damping,
+                max_iterations,
+                limit,
+            } => {
+                assert_eq!(table, "calls");
+                assert!((damping - 0.9).abs() < f64::EPSILON);
+                assert_eq!(max_iterations, 50);
+                assert_eq!(limit, Some(10));
+            }
+            _ => panic!("expected GraphPagerank"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_pagerank_defaults() {
+        match stmt("GRAPH PAGERANK calls") {
+            Statement::GraphPagerank {
+                damping,
+                max_iterations,
+                limit,
+                ..
+            } => {
+                assert!((damping - 0.85).abs() < f64::EPSILON);
+                assert_eq!(max_iterations, 100);
+                assert_eq!(limit, None);
+            }
+            _ => panic!("expected GraphPagerank"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_centrality_modes() {
+        assert!(matches!(
+            stmt("GRAPH CENTRALITY calls"),
+            Statement::GraphCentrality {
+                mode: CentralityMode::Degree,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stmt("GRAPH CENTRALITY calls INDEGREE"),
+            Statement::GraphCentrality {
+                mode: CentralityMode::InDegree,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stmt("GRAPH CENTRALITY calls OUTDEGREE LIMIT 3"),
+            Statement::GraphCentrality {
+                mode: CentralityMode::OutDegree,
+                limit: Some(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_graph_path_stmt() {
+        match stmt("GRAPH PATH a -> b ON calls MAX_DEPTH 4") {
+            Statement::GraphPath {
+                src,
+                dst,
+                table,
+                max_depth,
+            } => {
+                assert_eq!(src, "a");
+                assert_eq!(dst, "b");
+                assert_eq!(table, "calls");
+                assert_eq!(max_depth, Some(4));
+            }
+            _ => panic!("expected GraphPath"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_edges_with_where() {
+        match stmt("GRAPH EDGES calls WHERE weight > 0.5") {
+            Statement::GraphEdges {
+                table,
+                filter: Some(_),
+            } => assert_eq!(table, "calls"),
+            _ => panic!("expected GraphEdges"),
+        }
+    }
+
+    #[test]
+    fn parse_hybrid_search_full() {
+        match stmt(
+            "HYBRID SEARCH doc TEXT body 'graph db' VECTOR emb [0.1, 0.2] ALPHA 0.7 WHERE lang = 'en' LIMIT 5",
+        ) {
+            Statement::HybridSearch {
+                table,
+                text_field,
+                query,
+                vector_field,
+                vector,
+                alpha,
+                filter,
+                limit,
+            } => {
+                assert_eq!(table, "doc");
+                assert_eq!(text_field, "body");
+                assert_eq!(query, "graph db");
+                assert_eq!(vector_field, "emb");
+                assert!(matches!(vector.as_slice(), [_, _]));
+                assert_eq!(alpha, Some(0.7));
+                assert!(filter.is_some());
+                assert_eq!(limit, Some(5));
+            }
+            _ => panic!("expected HybridSearch"),
+        }
+    }
+
+    #[test]
+    fn parse_hybrid_search_defaults() {
+        assert!(matches!(
+            stmt("HYBRID SEARCH doc TEXT body 'x' VECTOR emb [1.0]"),
+            Statement::HybridSearch {
+                alpha: None,
+                filter: None,
+                limit: None,
+                ..
+            }
         ));
     }
 }

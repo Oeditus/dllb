@@ -49,15 +49,22 @@ pub enum Statement {
         fields: Vec<(String, Literal)>,
         on_conflict: Option<OnConflict>,
     },
-    /// `SELECT fields FROM target [WHERE clause] [LIMIT n];`
+    /// `SELECT fields FROM target [WHERE clause] [ORDER BY ...] [LIMIT n];`
     Select {
         fields: SelectFields,
         from: FromTarget,
         filter: Option<WhereClause>,
+        /// Zero or more sort keys, applied in order. Empty means unordered.
+        order_by: Vec<OrderKey>,
         limit: Option<u64>,
     },
     /// `DELETE table:id;`
     Delete { table: String, id: String },
+    /// `DELETE <table> [WHERE clause];` -- delete every matching row.
+    DeleteWhere {
+        table: String,
+        filter: Option<WhereClause>,
+    },
     /// `RELATE src->edge_type->dst [SET field = value, ...];`
     Relate {
         src: RecordRef,
@@ -84,10 +91,14 @@ pub enum Statement {
         fields: Vec<(String, Literal)>,
         filter: Option<WhereClause>,
     },
-    /// `COUNT <table> [WHERE clause]` -- server-side row count.
+    /// `COUNT <table> [WHERE clause] [GROUP BY field]` -- server-side count.
+    ///
+    /// With `group_by`, returns one row per distinct value of the field with
+    /// its count; otherwise a single total count.
     Count {
         table: String,
         filter: Option<WhereClause>,
+        group_by: Option<String>,
     },
     /// `GRAPH COMPONENTS <table>` -- connected components over an edge table.
     GraphComponents {
@@ -122,20 +133,81 @@ pub enum Statement {
         dim: usize,
         metric: Option<String>,
     },
-    /// `SEARCH <table> <field> '<query>' [LIMIT n]` -- BM25 full-text search.
+    /// `SEARCH <table> <field> '<query>' [WHERE clause] [LIMIT n]` -- BM25 search.
     Search {
         table: String,
         field: String,
         query: String,
+        filter: Option<WhereClause>,
         limit: Option<u64>,
     },
-    /// `VECTOR SEARCH <table> <field> [v1, v2, ...] [K n]` -- ANN search.
+    /// `VECTOR SEARCH <table> <field> [v1, ...] [WHERE clause] [K n]` -- ANN search.
     VectorSearch {
         table: String,
         field: String,
         vector: Vec<f64>,
+        filter: Option<WhereClause>,
         k: Option<u64>,
     },
+    /// `HYBRID SEARCH <table> TEXT <field> '<query>' VECTOR <field> [..]
+    /// [ALPHA f] [WHERE clause] [LIMIT n]` -- weighted BM25 + ANN fusion.
+    HybridSearch {
+        table: String,
+        text_field: String,
+        query: String,
+        vector_field: String,
+        vector: Vec<f64>,
+        /// Weight on the (normalized) text score; the vector score gets
+        /// `1 - alpha`. Defaults to 0.5 when omitted.
+        alpha: Option<f64>,
+        filter: Option<WhereClause>,
+        limit: Option<u64>,
+    },
+    /// `GRAPH PAGERANK <table> [DAMPING f] [MAX_ITER n] [LIMIT n]`.
+    GraphPagerank {
+        table: String,
+        damping: f64,
+        max_iterations: usize,
+        limit: Option<u64>,
+    },
+    /// `GRAPH CENTRALITY <table> [DEGREE|INDEGREE|OUTDEGREE] [LIMIT n]`.
+    GraphCentrality {
+        table: String,
+        mode: CentralityMode,
+        limit: Option<u64>,
+    },
+    /// `GRAPH PATH <src> -> <dst> ON <table> [MAX_DEPTH n]` -- shortest path.
+    GraphPath {
+        src: String,
+        dst: String,
+        table: String,
+        max_depth: Option<usize>,
+    },
+    /// `GRAPH EDGES <table> [WHERE clause]` -- list edges with weights.
+    GraphEdges {
+        table: String,
+        filter: Option<WhereClause>,
+    },
+}
+
+/// A single ORDER BY sort key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderKey {
+    pub field: String,
+    /// `true` for `DESC`, `false` for `ASC` (the default).
+    pub descending: bool,
+}
+
+/// Degree-centrality mode for `GRAPH CENTRALITY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CentralityMode {
+    /// Total incident edges (in + out); the default.
+    #[default]
+    Degree,
+    /// Incoming edges only.
+    InDegree,
+    /// Outgoing edges only.
+    OutDegree,
 }
 
 /// Which fields to return in a SELECT.

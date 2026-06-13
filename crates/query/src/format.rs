@@ -49,6 +49,9 @@ fn format_result_json(result: &QueryResult) -> String {
         QueryResult::Deleted { existed } => {
             format!(r#"{{"status":"deleted","existed":{existed}}}"#)
         }
+        QueryResult::DeletedMany { count } => {
+            format!(r#"{{"status":"deleted_many","count":{count}}}"#)
+        }
         QueryResult::Batch {
             count,
             created,
@@ -111,6 +114,9 @@ fn format_result_toon(result: &QueryResult) -> String {
         }
         QueryResult::Deleted { existed } => {
             format!("status = \"deleted\"\nexisted = {existed}")
+        }
+        QueryResult::DeletedMany { count } => {
+            format!("status = \"deleted_many\"\ncount = {count}")
         }
         QueryResult::Batch {
             count,
@@ -209,6 +215,9 @@ fn format_result_csv(result: &QueryResult) -> String {
         }
         QueryResult::Deleted { existed } => {
             format!("status,existed\ndeleted,{existed}")
+        }
+        QueryResult::DeletedMany { count } => {
+            format!("status,count\ndeleted_many,{count}")
         }
         QueryResult::Batch {
             count,
