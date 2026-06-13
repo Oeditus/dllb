@@ -78,6 +78,18 @@ impl FtsManager {
         Ok(())
     }
 
+    /// Drop a full-text index: close its in-memory handle and remove the
+    /// on-disk Tantivy directory. Idempotent (a missing index is a no-op).
+    pub fn drop_index(&mut self, table: &str, field: &str) -> Result<()> {
+        let key = index_key(table, field);
+        self.indexes.remove(&key);
+        let path = self.base_dir.join("fts").join(&key);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|e| Error::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn get_index(&self, table: &str, field: &str) -> Result<&FtsIndex> {
         let key = index_key(table, field);
         self.indexes

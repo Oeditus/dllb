@@ -93,11 +93,11 @@ fn bench_indexed_lookup(c: &mut Criterion) {
     for count in [1_000usize, 10_000] {
         let dir = tempfile::tempdir().unwrap();
         let store = DllbStorage::open(dir.path().join("bench.db")).unwrap();
-        let coll = Collection::new(&store, "ns", "db", "users").with_index(IndexDefinition {
-            name: "by_age".into(),
-            fields: vec!["age".into()],
-            unique: false,
-        });
+        let coll = Collection::new(&store, "ns", "db", "users").with_index(IndexDefinition::btree(
+            "by_age",
+            vec!["age".into()],
+            false,
+        ));
         for i in 0..count {
             coll.create(make_doc("users", i)).unwrap();
         }

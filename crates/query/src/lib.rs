@@ -16,6 +16,7 @@ pub mod cache;
 pub mod executor;
 pub mod format;
 pub mod parser;
+pub mod search;
 pub mod tokenizer;
 
 pub use ast::{OutcomeFormat, Query};
@@ -23,3 +24,4 @@ pub use cache::{ComputeCache, WriteVersions};
 pub use executor::{QueryExecutor, QueryResult};
 pub use format::{format_error, format_result};
 pub use parser::parse;
+pub use search::SearchServices;

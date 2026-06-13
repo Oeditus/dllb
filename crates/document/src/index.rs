@@ -15,6 +15,23 @@ use dllb_storage::key;
 
 use crate::Document;
 
+/// The kind of secondary index.
+///
+/// `BTree` indexes live entirely in the redb keyspace and are maintained by
+/// this crate. `FullText` and `Vector` indexes are backed by external
+/// structures (Tantivy / HNSW) that live outside redb; the catalog only
+/// records their definition, and the query layer maintains the structures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IndexKind {
+    /// Sort-ordered B-tree index over one or more fields (the default).
+    #[default]
+    BTree,
+    /// Full-text (BM25) index over a single text field, with a named analyzer.
+    FullText { analyzer: String },
+    /// Approximate-nearest-neighbor index over a single vector field.
+    Vector { dim: usize, metric: String },
+}
+
 /// Definition of a secondary index on a collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexDefinition {
@@ -22,10 +39,32 @@ pub struct IndexDefinition {
     pub name: String,
     /// Field names to index, in order. Multiple fields form a composite index
     /// (entries are keyed by the concatenated tuple, enabling leftmost-prefix
-    /// and prefix-plus-range lookups).
+    /// and prefix-plus-range lookups). Full-text and vector indexes use a
+    /// single field.
     pub fields: Vec<String>,
-    /// If true, no two documents may have the same indexed value.
+    /// If true, no two documents may have the same indexed value (B-tree only).
     pub unique: bool,
+    /// The index kind. Defaults to `BTree` so catalog entries written before
+    /// this field existed deserialize unchanged.
+    #[serde(default)]
+    pub kind: IndexKind,
+}
+
+impl IndexDefinition {
+    /// Construct a B-tree index definition.
+    pub fn btree(name: impl Into<String>, fields: Vec<String>, unique: bool) -> Self {
+        Self {
+            name: name.into(),
+            fields,
+            unique,
+            kind: IndexKind::BTree,
+        }
+    }
+
+    /// Whether this is a B-tree (redb-backed) index.
+    pub fn is_btree(&self) -> bool {
+        matches!(self.kind, IndexKind::BTree)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +229,11 @@ pub fn build_index_entries(
     let id = &doc.id.id;
 
     for idx in indexes {
+        // Only B-tree indexes live in the redb keyspace; full-text and vector
+        // indexes are maintained out-of-band by the query layer.
+        if !idx.is_btree() {
+            continue;
+        }
         if idx.fields.is_empty() {
             return Err(Error::Index("index has no fields".into()));
         }
@@ -471,6 +515,22 @@ mod tests {
     #[test]
     fn unsupported_type_errors() {
         assert!(encode_index_value(&Value::Array(vec![])).is_err());
+    }
+
+    #[test]
+    fn index_definition_back_compat_without_kind() {
+        // Catalog entries written before `kind` existed are positional 3-tuples
+        // (rmp-serde encodes structs as arrays). They must still deserialize,
+        // with `kind` defaulting to BTree.
+        let legacy = ("by_age".to_string(), vec!["age".to_string()], false);
+        let bytes = rmp_serde::to_vec(&legacy).unwrap();
+        let def: IndexDefinition = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            def,
+            IndexDefinition::btree("by_age", vec!["age".into()], false)
+        );
+        assert_eq!(def.kind, IndexKind::BTree);
+        assert!(def.is_btree());
     }
 
     // -- order-preserving key part --------------------------------------------

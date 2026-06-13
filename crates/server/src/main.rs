@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-use dllb_query::{ComputeCache, QueryExecutor, WriteVersions, format_error, format_result};
+use dllb_query::{
+    ComputeCache, QueryExecutor, SearchServices, WriteVersions, format_error, format_result,
+};
 use dllb_storage::db::DllbStorage;
 
 #[tokio::main]
@@ -28,6 +30,11 @@ async fn main() {
     // invalidates the relevant analytics entries.
     let cache = Arc::new(ComputeCache::default());
     let versions = Arc::new(WriteVersions::default());
+
+    // Process-wide full-text/vector index services, shared across all
+    // connection handlers. Tantivy indexes live on disk beside the database
+    // file; HNSW vector indexes are held in memory and rebuilt on first use.
+    let search = Arc::new(SearchServices::new(format!("{db_path}.search")));
 
     let listener = TcpListener::bind(&bind)
         .await
@@ -49,6 +56,7 @@ async fn main() {
         let storage = Arc::clone(&storage);
         let cache = Arc::clone(&cache);
         let versions = Arc::clone(&versions);
+        let search = Arc::clone(&search);
         let ns = ns.clone();
         let db = db.clone();
 
@@ -91,12 +99,13 @@ async fn main() {
                     let response = if let Some(err_resp) = batch_err {
                         err_resp
                     } else {
-                        let executor = QueryExecutor::new_with_cache(
+                        let executor = QueryExecutor::new_with_services(
                             &storage,
                             &ns,
                             &db,
                             Arc::clone(&cache),
                             Arc::clone(&versions),
+                            Arc::clone(&search),
                         );
                         match executor.execute_batch(&batch_stmts) {
                             Ok(result) => format_result(&result, dllb_query::OutcomeFormat::Json),
@@ -114,12 +123,13 @@ async fn main() {
                     continue;
                 }
 
-                let executor = QueryExecutor::new_with_cache(
+                let executor = QueryExecutor::new_with_services(
                     &storage,
                     &ns,
                     &db,
                     Arc::clone(&cache),
                     Arc::clone(&versions),
+                    Arc::clone(&search),
                 );
                 let response = match executor.run(query) {
                     Ok((result, outcome)) => format_result(&result, outcome),

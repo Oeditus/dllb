@@ -107,6 +107,35 @@ pub enum Statement {
     /// `REMOVE INDEX <name> ON [TABLE] <table>` -- drop an index and all its
     /// entries.
     RemoveIndex { name: String, table: String },
+    /// `DEFINE FULLTEXT INDEX <name> ON [TABLE] <table> FIELDS <field> [ANALYZER <name>]`
+    DefineFulltextIndex {
+        name: String,
+        table: String,
+        field: String,
+        analyzer: Option<String>,
+    },
+    /// `DEFINE VECTOR INDEX <name> ON [TABLE] <table> FIELDS <field> DIMENSION <n> [METRIC <m>]`
+    DefineVectorIndex {
+        name: String,
+        table: String,
+        field: String,
+        dim: usize,
+        metric: Option<String>,
+    },
+    /// `SEARCH <table> <field> '<query>' [LIMIT n]` -- BM25 full-text search.
+    Search {
+        table: String,
+        field: String,
+        query: String,
+        limit: Option<u64>,
+    },
+    /// `VECTOR SEARCH <table> <field> [v1, v2, ...] [K n]` -- ANN search.
+    VectorSearch {
+        table: String,
+        field: String,
+        vector: Vec<f64>,
+        k: Option<u64>,
+    },
 }
 
 /// Which fields to return in a SELECT.

@@ -10,6 +10,8 @@ dllb-core = { workspace = true }
 dllb-storage = { workspace = true }
 dllb-document = { workspace = true }
 dllb-graph = { workspace = true }
+dllb-vector = { workspace = true }
+dllb-search = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 

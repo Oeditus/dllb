@@ -35,13 +35,15 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         Some(Token::Update) => parse_update(tokens, pos),
         Some(Token::Count) => parse_count(tokens, pos),
         Some(Token::Graph) => parse_graph(tokens, pos),
-        // DDL keywords are contextual idents (not reserved tokens) so they
-        // never shadow table/field names.
-        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("DEFINE") => {
-            parse_define_index(tokens, pos)
-        }
+        // DDL/search keywords are contextual idents (not reserved tokens) so
+        // they never shadow table/field names.
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("DEFINE") => parse_define(tokens, pos),
         Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("REMOVE") => {
             parse_remove_index(tokens, pos)
+        }
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("SEARCH") => parse_search(tokens, pos),
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("VECTOR") => {
+            parse_vector_search(tokens, pos)
         }
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
@@ -53,13 +55,23 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
 // REMOVE INDEX <name> ON [TABLE] <table>
 // -----------------------------------------------------------------------
 
-fn parse_define_index(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+fn parse_define(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect_keyword(tokens, pos, "DEFINE")?;
+    if consume_keyword(tokens, pos, "FULLTEXT") {
+        expect_keyword(tokens, pos, "INDEX")?;
+        return parse_define_fulltext(tokens, pos);
+    }
+    if consume_keyword(tokens, pos, "VECTOR") {
+        expect_keyword(tokens, pos, "INDEX")?;
+        return parse_define_vector(tokens, pos);
+    }
     expect_keyword(tokens, pos, "INDEX")?;
+    parse_define_btree(tokens, pos)
+}
+
+fn parse_define_btree(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     let name = expect_ident(tokens, pos)?;
-    expect(tokens, pos, &Token::On)?;
-    consume_keyword(tokens, pos, "TABLE"); // optional `ON TABLE`
-    let table = expect_ident(tokens, pos)?;
+    let table = parse_on_table(tokens, pos)?;
     expect_keyword(tokens, pos, "FIELDS")?;
 
     let mut fields = vec![expect_ident(tokens, pos)?];
@@ -76,6 +88,114 @@ fn parse_define_index(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         fields,
         unique,
     })
+}
+
+fn parse_define_fulltext(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    let name = expect_ident(tokens, pos)?;
+    let table = parse_on_table(tokens, pos)?;
+    expect_keyword(tokens, pos, "FIELDS")?;
+    let field = expect_ident(tokens, pos)?;
+    let analyzer = if consume_keyword(tokens, pos, "ANALYZER") {
+        Some(expect_ident(tokens, pos)?)
+    } else {
+        None
+    };
+    Ok(Statement::DefineFulltextIndex {
+        name,
+        table,
+        field,
+        analyzer,
+    })
+}
+
+fn parse_define_vector(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    let name = expect_ident(tokens, pos)?;
+    let table = parse_on_table(tokens, pos)?;
+    expect_keyword(tokens, pos, "FIELDS")?;
+    let field = expect_ident(tokens, pos)?;
+    expect_keyword(tokens, pos, "DIMENSION")?;
+    let dim = expect_positive_int(tokens, pos, "DIMENSION")? as usize;
+    let metric = if consume_keyword(tokens, pos, "METRIC") {
+        Some(expect_ident(tokens, pos)?)
+    } else {
+        None
+    };
+    Ok(Statement::DefineVectorIndex {
+        name,
+        table,
+        field,
+        dim,
+        metric,
+    })
+}
+
+// -----------------------------------------------------------------------
+// SEARCH <table> <field> '<query>' [LIMIT n]
+// VECTOR SEARCH <table> <field> [v1, v2, ...] [K n]
+// -----------------------------------------------------------------------
+
+fn parse_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "SEARCH")?;
+    let table = expect_ident(tokens, pos)?;
+    let field = expect_ident(tokens, pos)?;
+    let query = expect_string(tokens, pos)?;
+    let limit = parse_limit(tokens, pos)?;
+    Ok(Statement::Search {
+        table,
+        field,
+        query,
+        limit,
+    })
+}
+
+fn parse_vector_search(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "VECTOR")?;
+    expect_keyword(tokens, pos, "SEARCH")?;
+    let table = expect_ident(tokens, pos)?;
+    let field = expect_ident(tokens, pos)?;
+
+    // The query vector is an array literal of numbers.
+    let vector = match parse_literal(tokens, pos)? {
+        Literal::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    Literal::Float(f) => out.push(f),
+                    Literal::Int(n) => out.push(n as f64),
+                    other => {
+                        return Err(Error::Query(format!(
+                            "vector elements must be numbers, got {other:?}"
+                        )));
+                    }
+                }
+            }
+            out
+        }
+        other => {
+            return Err(Error::Query(format!(
+                "expected a vector literal [..], got {other:?}"
+            )));
+        }
+    };
+
+    let k = if consume_keyword(tokens, pos, "K") {
+        Some(expect_positive_int(tokens, pos, "K")?)
+    } else {
+        None
+    };
+    Ok(Statement::VectorSearch {
+        table,
+        field,
+        vector,
+        k,
+    })
+}
+
+/// Parse `ON [TABLE] <table>` and return the table name.
+fn parse_on_table(tokens: &[Token], pos: &mut usize) -> Result<String> {
+    expect(tokens, pos, &Token::On)?;
+    consume_keyword(tokens, pos, "TABLE"); // optional `ON TABLE`
+    expect_ident(tokens, pos)
 }
 
 fn parse_remove_index(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
@@ -696,6 +816,42 @@ fn consume_keyword(tokens: &[Token], pos: &mut usize, kw: &str) -> bool {
     false
 }
 
+/// Expect a string literal, consuming it.
+fn expect_string(tokens: &[Token], pos: &mut usize) -> Result<String> {
+    match tokens.get(*pos) {
+        Some(Token::StringLit(s)) => {
+            let v = s.clone();
+            *pos += 1;
+            Ok(v)
+        }
+        Some(t) => Err(Error::Query(format!("expected string literal, got {t:?}"))),
+        None => Err(Error::Query(
+            "unexpected end of input, expected string literal".into(),
+        )),
+    }
+}
+
+/// Expect a positive integer literal, consuming it. `what` names the clause
+/// for error messages.
+fn expect_positive_int(tokens: &[Token], pos: &mut usize, what: &str) -> Result<u64> {
+    match tokens.get(*pos) {
+        Some(Token::IntLit(n)) if *n > 0 => {
+            let v = *n as u64;
+            *pos += 1;
+            Ok(v)
+        }
+        Some(Token::IntLit(n)) => Err(Error::Query(format!(
+            "{what} must be a positive integer, got {n}"
+        ))),
+        Some(t) => Err(Error::Query(format!(
+            "expected positive integer for {what}, got {t:?}"
+        ))),
+        None => Err(Error::Query(format!(
+            "unexpected end of input, expected integer for {what}"
+        ))),
+    }
+}
+
 /// Parse an optional `OUTCOME JSON|TOON|CSV` clause.
 fn parse_outcome(tokens: &[Token], pos: &mut usize) -> Result<OutcomeFormat> {
     if !matches!(tokens.get(*pos), Some(Token::Outcome)) {
@@ -1242,6 +1398,158 @@ mod tests {
         // `unique` still parses as an ordinary WHERE field.
         assert!(matches!(
             stmt("SELECT * FROM user WHERE unique = 1"),
+            Statement::Select { .. }
+        ));
+    }
+
+    // -- FULLTEXT / VECTOR DDL + search verb tests ---------------------------
+
+    #[test]
+    fn parse_define_fulltext_default_analyzer() {
+        match stmt("DEFINE FULLTEXT INDEX ft ON article FIELDS body") {
+            Statement::DefineFulltextIndex {
+                name,
+                table,
+                field,
+                analyzer,
+            } => {
+                assert_eq!(name, "ft");
+                assert_eq!(table, "article");
+                assert_eq!(field, "body");
+                assert_eq!(analyzer, None);
+            }
+            _ => panic!("expected DefineFulltextIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_fulltext_with_analyzer_on_table() {
+        match stmt("DEFINE FULLTEXT INDEX ft ON TABLE article FIELDS body ANALYZER english;") {
+            Statement::DefineFulltextIndex {
+                table,
+                field,
+                analyzer,
+                ..
+            } => {
+                assert_eq!(table, "article");
+                assert_eq!(field, "body");
+                assert_eq!(analyzer, Some("english".into()));
+            }
+            _ => panic!("expected DefineFulltextIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_vector_with_dimension_and_metric() {
+        match stmt("DEFINE VECTOR INDEX vec ON doc FIELDS embedding DIMENSION 8 METRIC euclidean") {
+            Statement::DefineVectorIndex {
+                name,
+                table,
+                field,
+                dim,
+                metric,
+            } => {
+                assert_eq!(name, "vec");
+                assert_eq!(table, "doc");
+                assert_eq!(field, "embedding");
+                assert_eq!(dim, 8);
+                assert_eq!(metric, Some("euclidean".into()));
+            }
+            _ => panic!("expected DefineVectorIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_vector_default_metric() {
+        match stmt("DEFINE VECTOR INDEX vec ON doc FIELDS embedding DIMENSION 4") {
+            Statement::DefineVectorIndex { dim, metric, .. } => {
+                assert_eq!(dim, 4);
+                assert_eq!(metric, None);
+            }
+            _ => panic!("expected DefineVectorIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_define_vector_rejects_zero_dimension() {
+        assert!(parse("DEFINE VECTOR INDEX vec ON doc FIELDS embedding DIMENSION 0").is_err());
+    }
+
+    #[test]
+    fn parse_search_with_limit() {
+        match stmt("SEARCH article body 'graph database' LIMIT 5") {
+            Statement::Search {
+                table,
+                field,
+                query,
+                limit,
+            } => {
+                assert_eq!(table, "article");
+                assert_eq!(field, "body");
+                assert_eq!(query, "graph database");
+                assert_eq!(limit, Some(5));
+            }
+            _ => panic!("expected Search"),
+        }
+    }
+
+    #[test]
+    fn parse_search_without_limit() {
+        match stmt("SEARCH article body 'hello'") {
+            Statement::Search { query, limit, .. } => {
+                assert_eq!(query, "hello");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("expected Search"),
+        }
+    }
+
+    #[test]
+    fn parse_vector_search_with_k() {
+        match stmt("VECTOR SEARCH doc embedding [0.1, 2, 3.5] K 5") {
+            Statement::VectorSearch {
+                table,
+                field,
+                vector,
+                k,
+            } => {
+                assert_eq!(table, "doc");
+                assert_eq!(field, "embedding");
+                // Mixed int/float literals coerce to f64.
+                assert!(matches!(vector.as_slice(), [_, _, _]));
+                assert!((vector[1] - 2.0).abs() < f64::EPSILON);
+                assert_eq!(k, Some(5));
+            }
+            _ => panic!("expected VectorSearch"),
+        }
+    }
+
+    #[test]
+    fn parse_vector_search_without_k() {
+        match stmt("VECTOR SEARCH doc embedding [1.0, 2.0]") {
+            Statement::VectorSearch { vector, k, .. } => {
+                assert!(matches!(vector.as_slice(), [_, _]));
+                assert_eq!(k, None);
+            }
+            _ => panic!("expected VectorSearch"),
+        }
+    }
+
+    #[test]
+    fn parse_vector_search_requires_array() {
+        assert!(parse("VECTOR SEARCH doc embedding 'oops'").is_err());
+    }
+
+    #[test]
+    fn search_and_vector_remain_usable_as_field_names() {
+        // `SEARCH` / `VECTOR` are contextual statement keywords only, so they
+        // remain valid identifiers inside an ordinary SELECT.
+        assert!(matches!(
+            stmt("SELECT * FROM doc WHERE search = 1"),
+            Statement::Select { .. }
+        ));
+        assert!(matches!(
+            stmt("SELECT * FROM doc WHERE vector = 1"),
             Statement::Select { .. }
         ));
     }

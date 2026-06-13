@@ -207,11 +207,7 @@ fn schemafull_rejects_invalid_doc() {
 #[test]
 fn find_by_index_returns_matching_docs() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "idx_age".into(),
-        fields: vec!["age".into()],
-        unique: false,
-    };
+    let idx = IndexDefinition::btree("idx_age", vec!["age".into()], false);
     let c = coll(&storage).with_index(idx);
 
     c.create(make_doc("alice", "Alice", 30)).unwrap();
@@ -228,11 +224,7 @@ fn find_by_index_returns_matching_docs() {
 #[test]
 fn unique_index_rejects_duplicate_value() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "idx_email".into(),
-        fields: vec!["email".into()],
-        unique: true,
-    };
+    let idx = IndexDefinition::btree("idx_email", vec!["email".into()], true);
     let c = coll(&storage).with_index(idx);
 
     let doc1 = make_doc("alice", "Alice", 30).with_field("email", Value::String("a@b.c".into()));
@@ -246,11 +238,7 @@ fn unique_index_rejects_duplicate_value() {
 #[test]
 fn delete_removes_index_entries() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "idx_age".into(),
-        fields: vec!["age".into()],
-        unique: false,
-    };
+    let idx = IndexDefinition::btree("idx_age", vec!["age".into()], false);
     let c = coll(&storage).with_index(idx);
 
     c.create(make_doc("alice", "Alice", 30)).unwrap();
@@ -270,11 +258,7 @@ fn delete_removes_index_entries() {
 #[test]
 fn update_maintains_index_entries() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "idx_age".into(),
-        fields: vec!["age".into()],
-        unique: false,
-    };
+    let idx = IndexDefinition::btree("idx_age", vec!["age".into()], false);
     let c = coll(&storage).with_index(idx);
 
     c.create(make_doc("alice", "Alice", 30)).unwrap();
@@ -314,16 +298,8 @@ fn catalog_save_load_remove_roundtrip() {
 
     let (_dir, storage) = temp_storage();
 
-    let by_age = IndexDefinition {
-        name: "by_age".into(),
-        fields: vec!["age".into()],
-        unique: false,
-    };
-    let by_email = IndexDefinition {
-        name: "by_email".into(),
-        fields: vec!["email".into()],
-        unique: true,
-    };
+    let by_age = IndexDefinition::btree("by_age", vec!["age".into()], false);
+    let by_email = IndexDefinition::btree("by_email", vec!["email".into()], true);
     save_index_definition(&storage, "ns", "db", "user", &by_age).unwrap();
     save_index_definition(&storage, "ns", "db", "user", &by_email).unwrap();
 
@@ -348,11 +324,7 @@ fn collection_load_attaches_catalog_indexes() {
         "ns",
         "db",
         "user",
-        &IndexDefinition {
-            name: "by_age".into(),
-            fields: vec!["age".into()],
-            unique: false,
-        },
+        &IndexDefinition::btree("by_age", vec!["age".into()], false),
     )
     .unwrap();
 
@@ -371,11 +343,7 @@ fn collection_load_attaches_catalog_indexes() {
 #[test]
 fn find_ids_by_range_bounds_are_correct() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "by_age".into(),
-        fields: vec!["age".into()],
-        unique: false,
-    };
+    let idx = IndexDefinition::btree("by_age", vec!["age".into()], false);
     let c = coll(&storage).with_index(idx);
     for (id, age) in [("a", 10), ("b", 20), ("c", 30), ("d", 40)] {
         c.create(make_doc(id, id, age)).unwrap();
@@ -419,11 +387,7 @@ fn find_ids_by_range_bounds_are_correct() {
 #[test]
 fn composite_index_scan_full_prefix_and_range() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "by_tenant_age".into(),
-        fields: vec!["tenant".into(), "age".into()],
-        unique: false,
-    };
+    let idx = IndexDefinition::btree("by_tenant_age", vec!["tenant".into(), "age".into()], false);
     let c = coll(&storage).with_index(idx);
     let mk = |id: &str, tenant: &str, age: i64| {
         Document::new(RecordId::new("user", id))
@@ -490,11 +454,11 @@ fn composite_index_scan_full_prefix_and_range() {
 #[test]
 fn composite_unique_index_enforces_the_tuple() {
     let (_dir, storage) = temp_storage();
-    let idx = IndexDefinition {
-        name: "uq_tenant_email".into(),
-        fields: vec!["tenant".into(), "email".into()],
-        unique: true,
-    };
+    let idx = IndexDefinition::btree(
+        "uq_tenant_email",
+        vec!["tenant".into(), "email".into()],
+        true,
+    );
     let c = coll(&storage).with_index(idx);
     let mk = |id: &str, tenant: &str, email: &str| {
         Document::new(RecordId::new("user", id))

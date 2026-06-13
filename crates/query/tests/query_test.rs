@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dllb_core::Value;
 use dllb_graph::{EdgeStore, Traversal};
-use dllb_query::{ComputeCache, QueryExecutor, QueryResult, WriteVersions};
+use dllb_query::{ComputeCache, QueryExecutor, QueryResult, SearchServices, WriteVersions};
 use dllb_storage::db::DllbStorage;
 
 fn temp_storage() -> (tempfile::TempDir, DllbStorage) {
@@ -1680,4 +1680,206 @@ fn composite_index_maintained_after_update() {
         ),
         2
     );
+}
+
+// -------------------------------------------------------------------
+// Full-text (FTS) and vector (HNSW) indexes
+// -------------------------------------------------------------------
+
+/// Build an executor with full-text/vector search services rooted in `dir`.
+fn exec_with_search<'s>(storage: &'s DllbStorage, dir: &tempfile::TempDir) -> QueryExecutor<'s> {
+    let search = Arc::new(SearchServices::new(dir.path().join("search")));
+    QueryExecutor::new_with_services(
+        storage,
+        "ns",
+        "db",
+        Arc::new(ComputeCache::default()),
+        Arc::new(WriteVersions::default()),
+        search,
+    )
+}
+
+/// Extract the rows from a `QueryResult::Rows`.
+fn rows_of(result: QueryResult) -> Vec<std::collections::BTreeMap<String, Value>> {
+    match result {
+        QueryResult::Rows(rows) => rows,
+        other => panic!("expected Rows, got {other:?}"),
+    }
+}
+
+/// The `id` field of a result row as a string slice.
+fn row_id(row: &std::collections::BTreeMap<String, Value>) -> &str {
+    match row.get("id") {
+        Some(Value::String(s)) => s.as_str(),
+        other => panic!("expected string id, got {other:?}"),
+    }
+}
+
+#[test]
+fn fulltext_define_search_and_maintenance() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("CREATE doc:a SET body = 'the quick brown fox';")
+        .unwrap();
+    e.run("CREATE doc:b SET body = 'lazy dog sleeps';").unwrap();
+    e.run("CREATE doc:c SET body = 'quick quick quick fox';")
+        .unwrap();
+
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+
+    // 'quick' matches doc:a and doc:c; doc:c ranks first (higher term freq).
+    let rows = rows_of(e.run("SEARCH doc body 'quick'").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert!(rows.iter().all(|r| r.contains_key("score")));
+    assert_eq!(row_id(&rows[0]), "doc:c");
+
+    // Maintenance on CREATE: a new matching doc becomes searchable.
+    e.run("CREATE doc:d SET body = 'a quick note';").unwrap();
+    assert!(matches!(
+        rows_of(e.run("SEARCH doc body 'quick'").unwrap().0).as_slice(),
+        [_, _, _]
+    ));
+
+    // Maintenance on UPDATE: doc:b now contains 'quick'.
+    e.run("UPDATE doc:b SET body = 'now quick too';").unwrap();
+    assert!(matches!(
+        rows_of(e.run("SEARCH doc body 'quick'").unwrap().0).as_slice(),
+        [_, _, _, _]
+    ));
+
+    // Maintenance on DELETE: doc:c disappears from results.
+    e.run("DELETE doc:c;").unwrap();
+    let rows = rows_of(e.run("SEARCH doc body 'quick'").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _, _]));
+    assert!(rows.iter().all(|r| row_id(r) != "doc:c"));
+}
+
+#[test]
+fn fulltext_index_does_not_break_equality_select() {
+    // Regression: a full-text index shares the catalog but has no redb
+    // entries, so the B-tree planner must ignore it and fall back to a scan.
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("CREATE doc:a SET body = 'hello world';").unwrap();
+    e.run("CREATE doc:b SET body = 'goodbye';").unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+
+    let rows = rows_of(
+        e.run("SELECT * FROM doc WHERE body = 'goodbye';")
+            .unwrap()
+            .0,
+    );
+    assert!(matches!(rows.as_slice(), [_]));
+    assert_eq!(row_id(&rows[0]), "doc:b");
+
+    assert_eq!(
+        count_value(e.run("COUNT doc WHERE body = 'hello world';").unwrap().0),
+        1
+    );
+}
+
+#[test]
+fn remove_fulltext_index_disables_search() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("CREATE doc:a SET body = 'searchable text';").unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+    assert!(e.run("SEARCH doc body 'searchable'").is_ok());
+
+    e.run("REMOVE INDEX ft ON doc;").unwrap();
+    // With the catalog entry gone, SEARCH no longer resolves an index.
+    assert!(e.run("SEARCH doc body 'searchable'").is_err());
+}
+
+#[test]
+fn batch_create_maintains_fulltext() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body;")
+        .unwrap();
+
+    let stmts: Vec<dllb_query::ast::Statement> = [
+        "CREATE doc:a SET body = 'batch alpha'",
+        "CREATE doc:b SET body = 'batch beta'",
+    ]
+    .into_iter()
+    .map(|q| dllb_query::parse(q).unwrap().statement)
+    .collect();
+    e.execute_batch(&stmts).unwrap();
+
+    assert!(matches!(
+        rows_of(e.run("SEARCH doc body 'batch'").unwrap().0).as_slice(),
+        [_, _]
+    ));
+}
+
+#[test]
+fn vector_define_search_and_maintenance() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("CREATE pt:a SET emb = [1.0, 0.0];").unwrap();
+    e.run("CREATE pt:b SET emb = [0.0, 1.0];").unwrap();
+    e.run("CREATE pt:c SET emb = [0.9, 0.1];").unwrap();
+
+    e.run("DEFINE VECTOR INDEX vec ON pt FIELDS emb DIMENSION 2 METRIC euclidean;")
+        .unwrap();
+
+    // Nearest to (1,0): a (exact match), then c.
+    let rows = rows_of(e.run("VECTOR SEARCH pt emb [1.0, 0.0] K 2").unwrap().0);
+    assert!(matches!(rows.as_slice(), [_, _]));
+    assert!(rows.iter().all(|r| r.contains_key("distance")));
+    assert_eq!(row_id(&rows[0]), "pt:a");
+    assert_eq!(row_id(&rows[1]), "pt:c");
+
+    // Maintenance on CREATE: a near-axis point is added.
+    e.run("CREATE pt:d SET emb = [1.0, 0.05];").unwrap();
+    let rows = rows_of(e.run("VECTOR SEARCH pt emb [1.0, 0.0] K 1").unwrap().0);
+    assert_eq!(row_id(&rows[0]), "pt:a"); // exact match still wins
+
+    // Maintenance on DELETE: dropping the exact match promotes pt:d.
+    e.run("DELETE pt:a;").unwrap();
+    let rows = rows_of(e.run("VECTOR SEARCH pt emb [1.0, 0.0] K 1").unwrap().0);
+    assert_eq!(row_id(&rows[0]), "pt:d");
+}
+
+#[test]
+fn vector_query_dimension_mismatch_errors() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("CREATE pt:a SET emb = [1.0, 0.0];").unwrap();
+    e.run("DEFINE VECTOR INDEX vec ON pt FIELDS emb DIMENSION 2;")
+        .unwrap();
+
+    // A 3-dim query against a 2-dim index is rejected.
+    assert!(e.run("VECTOR SEARCH pt emb [1.0, 0.0, 0.0] K 1").is_err());
+}
+
+#[test]
+fn search_ddl_and_verbs_error_without_services() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage); // search services disabled
+
+    assert!(
+        e.run("DEFINE FULLTEXT INDEX ft ON doc FIELDS body")
+            .is_err()
+    );
+    assert!(
+        e.run("DEFINE VECTOR INDEX vec ON doc FIELDS emb DIMENSION 2")
+            .is_err()
+    );
+    assert!(e.run("SEARCH doc body 'x'").is_err());
+    assert!(e.run("VECTOR SEARCH doc emb [1.0, 2.0]").is_err());
+
+    // B-tree DDL is unaffected by the absence of search services.
+    e.run("CREATE doc:a SET body = 'hi';").unwrap();
+    assert!(e.run("DEFINE INDEX by_body ON doc FIELDS body").is_ok());
 }

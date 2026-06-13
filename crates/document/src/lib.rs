@@ -19,4 +19,4 @@ pub mod validate;
 
 pub use collection::Collection;
 pub use document::Document;
-pub use index::IndexDefinition;
+pub use index::{IndexDefinition, IndexKind};

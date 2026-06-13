@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dllb_core::{RecordId, Result, Value};
-use dllb_document::{Collection, Document, IndexDefinition, index};
+use dllb_document::{Collection, Document, IndexDefinition, IndexKind, index};
 use dllb_graph::{CommunityOptions, Edge, EdgeStore, Traversal, connected_components};
 use dllb_graph::{community::Algorithm, detect_communities_weighted};
 use dllb_storage::db::DllbStorage;
@@ -12,6 +12,7 @@ use dllb_storage::key;
 
 use crate::ast::*;
 use crate::cache::{CacheKey, CacheKind, ComputeCache, WriteVersions};
+use crate::search::{self, SearchServices};
 
 /// Result of executing a query.
 #[derive(Debug)]
@@ -68,6 +69,9 @@ pub struct QueryExecutor<'s> {
     cache: Arc<ComputeCache>,
     /// Per-table write-version counters used for cache invalidation.
     versions: Arc<WriteVersions>,
+    /// Process-wide full-text/vector index structures. `None` disables
+    /// full-text and vector DDL/search (B-tree indexes are unaffected).
+    services: Option<Arc<SearchServices>>,
 }
 
 impl<'s> QueryExecutor<'s> {
@@ -82,6 +86,7 @@ impl<'s> QueryExecutor<'s> {
             db: db.into(),
             cache: Arc::new(ComputeCache::default()),
             versions: Arc::new(WriteVersions::default()),
+            services: None,
         }
     }
 
@@ -104,6 +109,31 @@ impl<'s> QueryExecutor<'s> {
             db: db.into(),
             cache,
             versions,
+            services: None,
+        }
+    }
+
+    /// Create an executor with full-text/vector index services enabled.
+    ///
+    /// The shared [`SearchServices`] holds the stateful Tantivy/HNSW indexes
+    /// that the per-query executor cannot otherwise reach. All connection
+    /// handlers should share the same `Arc` so indexes built on one connection
+    /// are visible to all.
+    pub fn new_with_services(
+        storage: &'s DllbStorage,
+        ns: &str,
+        db: &str,
+        cache: Arc<ComputeCache>,
+        versions: Arc<WriteVersions>,
+        services: Arc<SearchServices>,
+    ) -> Self {
+        Self {
+            storage,
+            ns: ns.into(),
+            db: db.into(),
+            cache,
+            versions,
+            services: Some(services),
         }
     }
 
@@ -149,6 +179,31 @@ impl<'s> QueryExecutor<'s> {
                 unique,
             } => self.exec_define_index(name, table, fields, *unique),
             Statement::RemoveIndex { name, table } => self.exec_remove_index(name, table),
+            Statement::DefineFulltextIndex {
+                name,
+                table,
+                field,
+                analyzer,
+            } => self.exec_define_fulltext(name, table, field, analyzer.as_deref()),
+            Statement::DefineVectorIndex {
+                name,
+                table,
+                field,
+                dim,
+                metric,
+            } => self.exec_define_vector(name, table, field, *dim, metric.as_deref()),
+            Statement::Search {
+                table,
+                field,
+                query,
+                limit,
+            } => self.exec_search(table, field, query, *limit),
+            Statement::VectorSearch {
+                table,
+                field,
+                vector,
+                k,
+            } => self.exec_vector_search(table, field, vector, *k),
         }
     }
 
@@ -275,7 +330,7 @@ impl<'s> QueryExecutor<'s> {
         }
 
         // ON CONFLICT UPDATE requires an explicit ID to be meaningful.
-        if let Some(conflict) = on_conflict {
+        let (result, id_str) = if let Some(conflict) = on_conflict {
             let id_str = id.ok_or_else(|| {
                 dllb_core::Error::Query("ON CONFLICT UPDATE requires an explicit record ID".into())
             })?;
@@ -298,18 +353,31 @@ impl<'s> QueryExecutor<'s> {
             };
 
             let (result_id, was_created) = coll.upsert(id_str, doc, update_fields)?;
-            if was_created {
-                Ok(QueryResult::Created { id: result_id })
+            let key = result_id.id.clone();
+            let result = if was_created {
+                QueryResult::Created { id: result_id }
             } else {
-                Ok(QueryResult::Updated { id: result_id })
-            }
+                QueryResult::Updated { id: result_id }
+            };
+            (result, key)
         } else {
             let created_id = match id {
                 Some(id) => coll.create_with_id(id, doc)?,
                 None => coll.create(doc)?,
             };
-            Ok(QueryResult::Created { id: created_id })
+            let key = created_id.id.clone();
+            (QueryResult::Created { id: created_id }, key)
+        };
+
+        // Maintain full-text/vector indexes from the final stored document.
+        if self.services.is_some()
+            && let Some(stored) = coll.get(&id_str)?
+        {
+            self.maintain_search_indexes(table, &id_str, Some(&stored), coll.indexes())?;
+            self.commit_search()?;
         }
+
+        Ok(result)
     }
 
     fn exec_select(
@@ -563,6 +631,17 @@ impl<'s> QueryExecutor<'s> {
                 let coll = Collection::load(self.storage, &self.ns, &self.db, &r.table)?;
                 if coll.get(&r.id)?.is_some() {
                     coll.merge(&r.id, update_fields)?;
+                    if self.services.is_some()
+                        && let Some(stored) = coll.get(&r.id)?
+                    {
+                        self.maintain_search_indexes(
+                            &r.table,
+                            &r.id,
+                            Some(&stored),
+                            coll.indexes(),
+                        )?;
+                        self.commit_search()?;
+                    }
                     Ok(QueryResult::Update { matched: 1 })
                 } else {
                     Ok(QueryResult::Update { matched: 0 })
@@ -572,6 +651,7 @@ impl<'s> QueryExecutor<'s> {
             FromTarget::Table(table) => {
                 let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
                 let docs = coll.scan_all()?;
+                let services_on = self.services.is_some();
                 let mut matched = 0usize;
                 for doc in docs {
                     let keep = match filter {
@@ -580,8 +660,19 @@ impl<'s> QueryExecutor<'s> {
                     };
                     if keep {
                         coll.merge(&doc.id.id, update_fields.clone())?;
+                        if services_on && let Some(stored) = coll.get(&doc.id.id)? {
+                            self.maintain_search_indexes(
+                                table,
+                                &doc.id.id,
+                                Some(&stored),
+                                coll.indexes(),
+                            )?;
+                        }
                         matched += 1;
                     }
+                }
+                if services_on && matched > 0 {
+                    self.commit_search()?;
                 }
                 Ok(QueryResult::Update { matched })
             }
@@ -666,6 +757,10 @@ impl<'s> QueryExecutor<'s> {
         // Cache each table's index definitions so the catalog is loaded at
         // most once per distinct table across the whole batch.
         let mut idx_cache: HashMap<String, Vec<IndexDefinition>> = HashMap::new();
+        // (table, id) of documents written by this batch that carry a
+        // full-text/vector index, reindexed after the atomic write.
+        let mut search_creates: Vec<(String, String)> = Vec::new();
+        let services_on = self.services.is_some();
 
         for stmt in stmts {
             match stmt {
@@ -715,6 +810,9 @@ impl<'s> QueryExecutor<'s> {
                         } else {
                             updated += 1;
                         }
+                        if services_on && idx_cache[table].iter().any(|d| !d.is_btree()) {
+                            search_creates.push((table.clone(), id_str.to_string()));
+                        }
                     } else {
                         let id_str = match id {
                             Some(s) => s.clone(),
@@ -723,6 +821,9 @@ impl<'s> QueryExecutor<'s> {
                         let (_rid, puts) = coll.create_to_ops(&id_str, doc)?;
                         all_puts.extend(puts);
                         created += 1;
+                        if services_on && idx_cache[table].iter().any(|d| !d.is_btree()) {
+                            search_creates.push((table.clone(), id_str));
+                        }
                     }
                 }
                 Statement::Relate {
@@ -755,6 +856,18 @@ impl<'s> QueryExecutor<'s> {
         let del_refs: Vec<&[u8]> = all_deletes.iter().map(|k| k.as_slice()).collect();
         self.storage.write_batch(&put_refs, &del_refs)?;
 
+        // Maintain full-text/vector indexes for the batch's documents (only
+        // tables carrying such an index were recorded above).
+        if !search_creates.is_empty() {
+            for (tbl, id) in &search_creates {
+                let coll = Collection::new(self.storage, &self.ns, &self.db, tbl);
+                if let Some(stored) = coll.get(id)? {
+                    self.maintain_search_indexes(tbl, id, Some(&stored), &idx_cache[tbl])?;
+                }
+            }
+            self.commit_search()?;
+        }
+
         let count = stmts.len();
 
         // Bump write versions for any edge types touched.
@@ -775,6 +888,12 @@ impl<'s> QueryExecutor<'s> {
         // Catalog-aware so index entries are removed alongside the document.
         let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
         let existed = coll.delete(id)?;
+        if existed && self.services.is_some() {
+            // Remove the document from any full-text/vector indexes (delete is
+            // by id, so the document body is not needed).
+            self.maintain_search_indexes(table, id, None, coll.indexes())?;
+            self.commit_search()?;
+        }
         Ok(QueryResult::Deleted { existed })
     }
 
@@ -798,11 +917,7 @@ impl<'s> QueryExecutor<'s> {
                 "DEFINE INDEX requires at least one field".into(),
             ));
         }
-        let def = IndexDefinition {
-            name: name.to_string(),
-            fields: fields.to_vec(),
-            unique,
-        };
+        let def = IndexDefinition::btree(name, fields.to_vec(), unique);
 
         // Scan existing documents to backfill entries (and validate uniqueness
         // up front so a failed constraint persists nothing). Uniqueness is over
@@ -845,15 +960,328 @@ impl<'s> QueryExecutor<'s> {
     }
 
     /// `REMOVE INDEX`: delete the catalog definition and every index entry in
-    /// one atomic write. Subsequent queries fall back to scans.
+    /// one atomic write, then drop any external (full-text / vector) structure.
+    /// Subsequent queries fall back to scans.
     fn exec_remove_index(&self, name: &str, table: &str) -> Result<QueryResult> {
+        // Look up the definition first so external structures can be cleaned
+        // up, not just the redb entries.
+        let existing = index::load_index_definitions(self.storage, &self.ns, &self.db, table)?
+            .into_iter()
+            .find(|d| d.name == name);
+
         let def_key = key::index_catalog_key(&self.ns, &self.db, table, name);
         let entry_prefix = key::index_prefix(&self.ns, &self.db, table, name);
         let mut deletes: Vec<Vec<u8>> = self.storage.scan_prefix_keys(&entry_prefix)?;
         deletes.push(def_key);
         let del_refs: Vec<&[u8]> = deletes.iter().map(|k| k.as_slice()).collect();
         self.storage.write_batch(&[], &del_refs)?;
+
+        // Drop external structures for full-text / vector indexes.
+        if let (Some(def), Some(services)) = (existing, self.services.as_ref()) {
+            match &def.kind {
+                IndexKind::Vector { .. } => services.drop_vector(name)?,
+                IndexKind::FullText { .. } => {
+                    if let Some(field) = def.fields.first() {
+                        services.drop_fulltext(table, field)?;
+                    }
+                }
+                IndexKind::BTree => {}
+            }
+        }
+
         Ok(QueryResult::Ok)
+    }
+
+    // -------------------------------------------------------------------
+    // Full-text / vector index DDL, search, and maintenance
+    // -------------------------------------------------------------------
+
+    /// Borrow the shared search services, or fail with a clear message when
+    /// the server was started without them (B-tree DDL is unaffected).
+    fn require_services(&self) -> Result<&Arc<SearchServices>> {
+        self.services.as_ref().ok_or_else(|| {
+            dllb_core::Error::Query(
+                "full-text and vector index features are not enabled on this server".into(),
+            )
+        })
+    }
+
+    /// `DEFINE FULLTEXT INDEX`: persist the catalog definition, open the
+    /// Tantivy index, and backfill it from existing documents.
+    fn exec_define_fulltext(
+        &self,
+        name: &str,
+        table: &str,
+        field: &str,
+        analyzer: Option<&str>,
+    ) -> Result<QueryResult> {
+        let services = self.require_services()?;
+        let analyzer = analyzer.unwrap_or("default").to_string();
+        // Validate the analyzer name before persisting anything.
+        search::parse_analyzer(&analyzer)?;
+
+        let def = IndexDefinition {
+            name: name.to_string(),
+            fields: vec![field.to_string()],
+            unique: false,
+            kind: IndexKind::FullText {
+                analyzer: analyzer.clone(),
+            },
+        };
+        let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
+        self.storage
+            .write_batch(&[(def_key.as_slice(), def_bytes.as_slice())], &[])?;
+
+        // Open the index and backfill text from existing documents.
+        services.ensure_fulltext(table, field, &analyzer)?;
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        for doc in coll.scan_all()? {
+            if let Some(text) = doc.fields.get(field).and_then(search::value_to_text) {
+                services.fts_index(table, field, &doc.id.id, text)?;
+            }
+        }
+        services.fts_commit()?;
+
+        Ok(QueryResult::Ok)
+    }
+
+    /// `DEFINE VECTOR INDEX`: persist the catalog definition, register a fresh
+    /// in-memory HNSW index, and backfill it from existing embeddings.
+    fn exec_define_vector(
+        &self,
+        name: &str,
+        table: &str,
+        field: &str,
+        dim: usize,
+        metric: Option<&str>,
+    ) -> Result<QueryResult> {
+        let services = self.require_services()?;
+        if dim == 0 {
+            return Err(dllb_core::Error::Query(
+                "DEFINE VECTOR INDEX requires a positive DIMENSION".into(),
+            ));
+        }
+        let metric = metric.unwrap_or("cosine").to_string();
+        // Validate the metric name before persisting anything.
+        let parsed_metric = search::parse_metric(&metric)?;
+
+        let def = IndexDefinition {
+            name: name.to_string(),
+            fields: vec![field.to_string()],
+            unique: false,
+            kind: IndexKind::Vector {
+                dim,
+                metric: metric.clone(),
+            },
+        };
+        let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
+        self.storage
+            .write_batch(&[(def_key.as_slice(), def_bytes.as_slice())], &[])?;
+
+        // Register a fresh index and backfill embeddings from existing docs.
+        services.define_vector(name, dim, parsed_metric)?;
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        for doc in coll.scan_all()? {
+            if let Some(v) = doc.fields.get(field).and_then(search::value_to_vector) {
+                services.vector_insert(name, &doc.id.id, v)?;
+            }
+        }
+
+        Ok(QueryResult::Ok)
+    }
+
+    /// `SEARCH <table> <field> '<query>' [LIMIT n]`: BM25 full-text search,
+    /// returning matching documents in rank order, each with a `score` field.
+    fn exec_search(
+        &self,
+        table: &str,
+        field: &str,
+        query: &str,
+        limit: Option<u64>,
+    ) -> Result<QueryResult> {
+        let services = self.require_services()?;
+        // Resolve the analyzer from the catalog and ensure the index is open
+        // in this process before searching.
+        let def = self.find_search_index(table, field, SearchKind::FullText)?;
+        if let IndexKind::FullText { analyzer } = &def.kind {
+            services.ensure_fulltext(table, field, analyzer)?;
+        }
+
+        let limit = limit.map(|n| n as usize).unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let hits = services.fts_search(table, field, query, limit)?;
+        self.rows_from_hits(table, hits, "score")
+    }
+
+    /// `VECTOR SEARCH <table> <field> [..] [K n]`: approximate KNN search,
+    /// returning nearest documents in distance order, each with a `distance`
+    /// field.
+    fn exec_vector_search(
+        &self,
+        table: &str,
+        field: &str,
+        vector: &[f64],
+        k: Option<u64>,
+    ) -> Result<QueryResult> {
+        let services = self.require_services()?;
+        let def = self.find_search_index(table, field, SearchKind::Vector)?;
+        if let IndexKind::Vector { dim, metric } = &def.kind {
+            // Rebuild the in-memory index from stored embeddings if this
+            // process has not populated it yet (HNSW is not persisted).
+            self.ensure_vector_loaded(table, &def, *dim, metric)?;
+        }
+
+        let query: Vec<f32> = vector.iter().map(|f| *f as f32).collect();
+        let k = k.map(|n| n as usize).unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let hits = services.vector_search(&def.name, &query, k)?;
+        self.rows_from_hits(table, hits, "distance")
+    }
+
+    /// Resolve ranked `(id, metric)` hits to full document rows, preserving
+    /// rank order and attaching the metric under `score_field`. Hits whose
+    /// document no longer exists are skipped.
+    fn rows_from_hits(
+        &self,
+        table: &str,
+        hits: Vec<(String, f32)>,
+        score_field: &str,
+    ) -> Result<QueryResult> {
+        let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        let docs = coll.get_many(&ids)?;
+        let by_id: HashMap<String, Document> =
+            docs.into_iter().map(|d| (d.id.id.clone(), d)).collect();
+
+        let mut rows = Vec::with_capacity(hits.len());
+        for (id, score) in hits {
+            if let Some(doc) = by_id.get(&id) {
+                let mut row = doc.fields.clone();
+                row.insert("id".into(), Value::String(format!("{table}:{id}")));
+                row.insert(score_field.into(), Value::Float(score as f64));
+                rows.push(row);
+            }
+        }
+        Ok(QueryResult::Rows(rows))
+    }
+
+    /// Find the single full-text or vector index defined on `table.field`.
+    fn find_search_index(
+        &self,
+        table: &str,
+        field: &str,
+        want: SearchKind,
+    ) -> Result<IndexDefinition> {
+        let defs = index::load_index_definitions(self.storage, &self.ns, &self.db, table)?;
+        defs.into_iter()
+            .find(|d| {
+                d.fields.first().map(String::as_str) == Some(field)
+                    && matches!(
+                        (&d.kind, want),
+                        (IndexKind::FullText { .. }, SearchKind::FullText)
+                            | (IndexKind::Vector { .. }, SearchKind::Vector)
+                    )
+            })
+            .ok_or_else(|| {
+                dllb_core::Error::Query(format!(
+                    "no {} index defined on {table}.{field}",
+                    want.label()
+                ))
+            })
+    }
+
+    /// Ensure a vector index is present in memory, rebuilding it from stored
+    /// documents when necessary (HNSW is in-memory only, so a fresh process
+    /// starts empty).
+    fn ensure_vector_loaded(
+        &self,
+        table: &str,
+        def: &IndexDefinition,
+        dim: usize,
+        metric: &str,
+    ) -> Result<()> {
+        let Some(services) = &self.services else {
+            return Ok(());
+        };
+        if services.vector_exists(&def.name)? {
+            return Ok(());
+        }
+        let parsed_metric = search::parse_metric(metric)?;
+        services.define_vector(&def.name, dim, parsed_metric)?;
+
+        let Some(field) = def.fields.first() else {
+            return Ok(());
+        };
+        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
+        for doc in coll.scan_all()? {
+            if let Some(v) = doc.fields.get(field).and_then(search::value_to_vector) {
+                services.vector_insert(&def.name, &doc.id.id, v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Maintain full-text/vector indexes after a single-document mutation.
+    ///
+    /// `doc` is the post-write document for a create/update, or `None` for a
+    /// delete. `defs` is the table's already-loaded catalog (so this adds no
+    /// extra scan). No-op when search services are disabled. Full-text writes
+    /// are buffered; the caller must call [`commit_search`](Self::commit_search).
+    fn maintain_search_indexes(
+        &self,
+        table: &str,
+        id: &str,
+        doc: Option<&Document>,
+        defs: &[IndexDefinition],
+    ) -> Result<()> {
+        let Some(services) = &self.services else {
+            return Ok(());
+        };
+        for def in defs {
+            let Some(field) = def.fields.first() else {
+                continue;
+            };
+            match &def.kind {
+                IndexKind::FullText { analyzer } => {
+                    services.ensure_fulltext(table, field, analyzer)?;
+                    match doc
+                        .and_then(|d| d.fields.get(field))
+                        .and_then(search::value_to_text)
+                    {
+                        Some(text) => services.fts_index(table, field, id, text)?,
+                        None => services.fts_delete(table, field, id)?,
+                    }
+                }
+                IndexKind::Vector { dim, metric } => {
+                    match doc
+                        .and_then(|d| d.fields.get(field))
+                        .and_then(search::value_to_vector)
+                    {
+                        Some(v) => {
+                            self.ensure_vector_loaded(table, def, *dim, metric)?;
+                            services.vector_insert(&def.name, id, v)?;
+                        }
+                        // A delete (or a row that no longer carries a vector)
+                        // need only touch an already-loaded index; an unloaded
+                        // one reflects storage when next rebuilt.
+                        None => {
+                            if services.vector_exists(&def.name)? {
+                                services.vector_remove(&def.name, id)?;
+                            }
+                        }
+                    }
+                }
+                IndexKind::BTree => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit buffered full-text writes so prior maintenance becomes visible
+    /// to searches. No-op when services are disabled.
+    fn commit_search(&self) -> Result<()> {
+        if let Some(services) = &self.services {
+            services.fts_commit()?;
+        }
+        Ok(())
     }
 
     fn exec_relate(
@@ -885,6 +1313,26 @@ fn algo_str(algo: &crate::ast::CommunityAlgorithm) -> &'static str {
     match algo {
         crate::ast::CommunityAlgorithm::Louvain => "louvain",
         crate::ast::CommunityAlgorithm::LabelPropagation => "lp",
+    }
+}
+
+/// Default row cap for `SEARCH` / `VECTOR SEARCH` when no `LIMIT` / `K` is given.
+const DEFAULT_SEARCH_LIMIT: usize = 10;
+
+/// Which external index kind a search verb targets.
+#[derive(Clone, Copy)]
+enum SearchKind {
+    FullText,
+    Vector,
+}
+
+impl SearchKind {
+    /// Human-readable label used in "no <kind> index" errors.
+    fn label(self) -> &'static str {
+        match self {
+            SearchKind::FullText => "full-text",
+            SearchKind::Vector => "vector",
+        }
     }
 }
 
@@ -994,6 +1442,11 @@ fn plan_index_lookup(indexes: &[IndexDefinition], clause: &WhereClause) -> Optio
 
     let mut best: Option<(IndexPlan, usize)> = None;
     for idx in indexes {
+        // Only B-tree indexes have redb entries to scan; full-text/vector
+        // indexes share the catalog but are queried via SEARCH / VECTOR SEARCH.
+        if !idx.is_btree() {
+            continue;
+        }
         if let Some((plan, consumed)) = plan_for_index(idx, &conjuncts) {
             let better = match &best {
                 None => true,
