@@ -1005,6 +1005,8 @@ dependencies = [
 [[package]]
 name = "joerl"
 version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d81e8e73e0a3444b1206f382a0709316adaf53119241c5bea9c99243c59d64e7"
 dependencies = [
  "async-trait",
  "bincode",
@@ -1027,6 +1029,8 @@ dependencies = [
 [[package]]
 name = "joerl_macro"
 version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10bfc5c623057ec8eb525a4e11bb0bf4c848d65b2bb14b9a13d7ddebfbdd7413"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1107,7 +1111,9 @@ checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 
 [[package]]
 name = "marcli"
-version = "0.2.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f979c9762563ed374fb275302311900990da235089849cc6c1467fbbfeb0f220"
 dependencies = [
  "comrak",
  "once_cell",

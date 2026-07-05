@@ -25,16 +25,36 @@ pub fn distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 /// Cosine distance = 1.0 - cosine_similarity.
 ///
 /// Returns 0.0 for identical directions, 1.0 for orthogonal, 2.0 for opposite.
+/// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
+    let chunks_a = a.chunks_exact(8);
+    let chunks_b = b.chunks_exact(8);
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    let mut dot_acc = [0.0f32; 8];
+    let mut norm_a_acc = [0.0f32; 8];
+    let mut norm_b_acc = [0.0f32; 8];
+
+    for (ca, cb) in chunks_a.zip(chunks_b) {
+        for i in 0..8 {
+            dot_acc[i] += ca[i] * cb[i];
+            norm_a_acc[i] += ca[i] * ca[i];
+            norm_b_acc[i] += cb[i] * cb[i];
+        }
     }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
+
+    let mut dot: f32 = dot_acc.iter().sum();
+    let mut norm_a_sum: f32 = norm_a_acc.iter().sum();
+    let mut norm_b_sum: f32 = norm_b_acc.iter().sum();
+
+    for i in 0..remainder_a.len() {
+        dot += remainder_a[i] * remainder_b[i];
+        norm_a_sum += remainder_a[i] * remainder_a[i];
+        norm_b_sum += remainder_b[i] * remainder_b[i];
+    }
+
+    let denom = norm_a_sum.sqrt() * norm_b_sum.sqrt();
     if denom == 0.0 {
         return 1.0; // zero vectors treated as orthogonal
     }
@@ -42,22 +62,49 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Euclidean (L2) distance.
+/// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    let mut sum = 0.0f32;
-    for i in 0..a.len() {
-        let d = a[i] - b[i];
-        sum += d * d;
+    let chunks_a = a.chunks_exact(8);
+    let chunks_b = b.chunks_exact(8);
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    let mut sum = [0.0f32; 8];
+    for (ca, cb) in chunks_a.zip(chunks_b) {
+        for i in 0..8 {
+            let d = ca[i] - cb[i];
+            sum[i] += d * d;
+        }
     }
-    sum.sqrt()
+
+    let mut total: f32 = sum.iter().sum();
+    for i in 0..remainder_a.len() {
+        let d = remainder_a[i] - remainder_b[i];
+        total += d * d;
+    }
+    total.sqrt()
 }
 
 /// Dot product of two vectors.
+/// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    let mut sum = 0.0f32;
-    for i in 0..a.len() {
-        sum += a[i] * b[i];
+    let chunks_a = a.chunks_exact(8);
+    let chunks_b = b.chunks_exact(8);
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    let mut sum = [0.0f32; 8];
+    for (ca, cb) in chunks_a.zip(chunks_b) {
+        for i in 0..8 {
+            sum[i] += ca[i] * cb[i];
+        }
     }
-    sum
+
+    let mut total: f32 = sum.iter().sum();
+    for i in 0..remainder_a.len() {
+        total += remainder_a[i] * remainder_b[i];
+    }
+    total
 }
 
 /// Dot product distance = negative dot product (lower = more similar).

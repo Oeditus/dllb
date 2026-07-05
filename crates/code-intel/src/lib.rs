@@ -15,12 +15,25 @@
 //!   fields (including vector embedding fields), and 6 edge type constants
 //! - [`extract`]: tree walking, function/import/variable/call extraction
 
+pub mod diff;
 pub mod extract;
+pub mod ingest;
 pub mod meta_ast;
+pub mod query_helpers;
 pub mod schemas;
+pub mod similarity;
 pub mod tokenizer;
 
+pub use diff::{AstChange, ChangeKind, DiffSummary, diff_trees};
 pub use extract::{FunctionInfo, ImportInfo};
+pub use ingest::{AstDocument, AstEdge, IngestBatch, IngestStats};
 pub use meta_ast::{Layer, MetaNode, MetaValue, NodeChildren, NodeType};
+pub use query_helpers::{
+    ancestors, call_targets, complexity_estimate, containing_container, containing_function,
+    find_by_name, find_by_type, find_parent, find_siblings, scope_at,
+};
 pub use schemas::{ALL_EDGE_TYPES, ast_node_schema};
+pub use similarity::{
+    ClonePair, find_clones, structural_similarity, subtree_hash, tree_fingerprint,
+};
 pub use tokenizer::code_tokenize;
