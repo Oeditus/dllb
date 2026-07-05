@@ -413,7 +413,7 @@ mod tests {
 
         // fn1 and fn2 are structural clones; fn3 is different
         assert!(
-            clones.len() >= 1,
+            !clones.is_empty(),
             "Expected at least one clone pair, got {}",
             clones.len()
         );

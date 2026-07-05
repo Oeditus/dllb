@@ -36,6 +36,7 @@ impl Default for HnswConfig {
 }
 
 /// Internal node in the HNSW graph.
+#[derive(Debug)]
 struct HnswNode {
     id: String,
     vector: Vec<f32>,
@@ -46,6 +47,7 @@ struct HnswNode {
 }
 
 /// In-memory HNSW approximate nearest neighbor index.
+#[derive(Debug)]
 pub struct HnswIndex {
     config: HnswConfig,
     metric: DistanceMetric,

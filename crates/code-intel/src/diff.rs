@@ -62,7 +62,14 @@ impl DiffSummary {
                     ChangeKind::Added | ChangeKind::Modified | ChangeKind::Renamed
                 )
             })
-            .map(|c| c.name.as_str())
+            .map(|c| {
+                if c.kind == ChangeKind::Renamed {
+                    // Name is stored as "old -> new"; return only the new name.
+                    c.name.split(" -> ").nth(1).unwrap_or(c.name.as_str())
+                } else {
+                    c.name.as_str()
+                }
+            })
             .collect()
     }
 
@@ -92,7 +99,7 @@ pub fn diff_trees(old: &MetaNode, new: &MetaNode) -> DiffSummary {
     for old_ent in &old_entities {
         match new_entities.iter().find(|n| n.key == old_ent.key) {
             Some(new_ent) => {
-                if !children_equal(old_ent.node, new_ent.node) {
+                if old_ent.node != new_ent.node {
                     changes.push(AstChange {
                         kind: ChangeKind::Modified,
                         node_type: new_ent.node.node_type,
@@ -192,14 +199,6 @@ fn collect_recursive<'a>(node: &'a MetaNode, out: &mut Vec<NamedEntity<'a>>) {
                 };
                 out.push(NamedEntity {
                     key: format!("fn::{}/{}", name, arity),
-                    node,
-                });
-            }
-        }
-        NodeType::Container => {
-            if let Some(name) = node.get_meta_str("name") {
-                out.push(NamedEntity {
-                    key: format!("container::{}", name),
                     node,
                 });
             }
