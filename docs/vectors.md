@@ -110,3 +110,24 @@ cargo test -p dllb-vector
 16 tests: 7 unit (distance metrics) + 9 integration (brute-force exact KNN,
 remove, empty search, HNSW single vector, remove, recall at 500 and 1000
 vectors, different metrics produce different rankings).
+
+## Concurrency & Thread Safety
+
+The query engine manages HNSW vector indexes via a process-wide `SearchServices` instance using a multi-layered, fine-grained locking strategy:
+
+### Fine-Grained Locking
+To prevent updates on one vector index from blocking searches on another, index locks are localized:
+1. **Map Retrieval**: Read-locking `SearchServices.vectors` is only held momentarily to retrieve and clone an `Arc<RwLock<HnswIndex>>`.
+2. **Search Operations**: Multiple readers can concurrently traverse the graph by acquiring a shared read lock (`index.read()`) on the index.
+3. **Write Operations**: Write-locking (`index.write()`) is localized to a single HNSW index during vector insertions or removals, keeping other indexes fully available.
+
+### Thread-Safe Lazy Rebuilding
+Because HNSW graphs are held in-memory and rebuilt from the KV catalog on first use (e.g., after a process restart), they utilize a **synchronized double-checked locking** pattern to avoid race conditions:
+1. `get_or_create_vector` atomically checks the map or creates a new entry with `loaded = false`.
+2. The querying thread attempts to acquire the entry's private `rebuild_lock` (a standard mutex).
+3. Once the lock is acquired, the thread double-checks the atomic `loaded` flag. If still `false`, it proceeds to scan the KV collection and populate the HNSW graph.
+4. When finished, it sets `loaded = true`. Subsequent threads bypass the lock entirely via the atomic fast-path check.
+
+### O(1) Index Lookup
+To avoid a slow linear scan during deletion, the `HnswIndex` maintains an internal `node_lookup: HashMap<String, usize>` mapping vector IDs to their indices in the `nodes` vector. This lookup table is dynamically rebuilt from the active (non-deleted) nodes when deserializing the graph.
+

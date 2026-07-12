@@ -53,6 +53,7 @@ pub struct HnswIndex {
     metric: DistanceMetric,
     _dim: usize,
     nodes: Vec<HnswNode>,
+    node_lookup: std::collections::HashMap<String, usize>,
     entry_point: Option<usize>,
     max_level: usize,
     ml: f64, // 1.0 / ln(M) for level generation
@@ -67,6 +68,7 @@ impl HnswIndex {
             metric,
             _dim: dim,
             nodes: Vec::new(),
+            node_lookup: std::collections::HashMap::new(),
             entry_point: None,
             max_level: 0,
             ml,
@@ -377,6 +379,13 @@ impl HnswIndex {
             });
         }
 
+        let mut node_lookup = std::collections::HashMap::new();
+        for (idx, node) in nodes.iter().enumerate() {
+            if !node.deleted {
+                node_lookup.insert(node.id.clone(), idx);
+            }
+        }
+
         let ml = 1.0 / (m as f64).ln();
 
         Ok(Self {
@@ -384,6 +393,7 @@ impl HnswIndex {
             metric,
             _dim: dim,
             nodes,
+            node_lookup,
             entry_point,
             max_level,
             ml,
@@ -458,6 +468,7 @@ impl VectorIndex for HnswIndex {
             neighbors: vec![vec![]; level + 1],
             deleted: false,
         });
+        self.node_lookup.insert(id.to_string(), new_idx);
 
         if self.entry_point.is_none() {
             self.entry_point = Some(new_idx);
@@ -491,11 +502,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&mut self, id: &str) -> bool {
-        for node in &mut self.nodes {
-            if node.id == id && !node.deleted {
-                node.deleted = true;
-                return true;
-            }
+        if let Some(&idx) = self.node_lookup.get(id)
+            && !self.nodes[idx].deleted
+        {
+            self.nodes[idx].deleted = true;
+            self.node_lookup.remove(id);
+            return true;
         }
         false
     }

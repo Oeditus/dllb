@@ -414,18 +414,16 @@ impl<'s> Collection<'s> {
         let new_idx =
             index::build_index_entries(new, &self.ns, &self.db, &self.table, &self.indexes)?;
 
-        // Delete old index entries
         let old_keys: Vec<&[u8]> = old_idx.iter().map(|(k, _)| k.as_slice()).collect();
-        if !old_keys.is_empty() {
-            self.storage.delete_batch(&old_keys)?;
-        }
 
         // Write new document + new index entries
         let mut ops: Vec<(&[u8], &[u8])> = vec![(&doc_key, &doc_bytes)];
         for (k, v) in &new_idx {
             ops.push((k.as_slice(), v.as_slice()));
         }
-        self.storage.put_batch(&ops)?;
+
+        // Apply deletes followed by puts in a single atomic transaction
+        self.storage.write_batch(&ops, &old_keys)?;
 
         Ok(())
     }

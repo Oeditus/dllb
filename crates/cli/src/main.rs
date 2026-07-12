@@ -6,10 +6,14 @@
 
 mod render;
 
-use dllb_query::{OutcomeFormat, QueryExecutor, format_error, format_result};
+use dllb_query::{
+    ComputeCache, OutcomeFormat, QueryExecutor, SearchServices, WriteVersions, format_error,
+    format_result,
+};
 use dllb_storage::db::DllbStorage;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use std::sync::Arc;
 
 const HELP: &str = "\
 ## Commands
@@ -50,7 +54,13 @@ fn main() {
     println!("{}\n", r.md(&banner));
 
     let storage = DllbStorage::open(&db_path).expect("failed to open database");
-    let executor = QueryExecutor::new(&storage, &ns, &db);
+
+    // Enable process-wide cache, versioning, and full-text/vector search services in the CLI.
+    let cache = Arc::new(ComputeCache::default());
+    let versions = Arc::new(WriteVersions::default());
+    let search = Arc::new(SearchServices::new(format!("{db_path}.search")));
+
+    let executor = QueryExecutor::new_with_services(&storage, &ns, &db, cache, versions, search);
 
     let mut rl = DefaultEditor::new().expect("failed to create editor");
     let _ = rl.load_history(".dllb_history");

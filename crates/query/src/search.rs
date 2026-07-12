@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use dllb_core::{Error, Result, Value};
 use dllb_search::{AnalyzerConfig, FtsManager, Language};
@@ -25,11 +25,14 @@ fn lock_err<E>(_: E) -> Error {
     Error::Index("search-service lock poisoned".into())
 }
 
-/// A registered vector index: its dimension plus the in-memory HNSW graph.
-/// The distance metric is baked into the `HnswIndex` itself at construction.
-struct VectorEntry {
-    dim: usize,
-    index: HnswIndex,
+/// A registered vector index: its dimension, the HNSW graph behind a lock,
+/// and synchronization tools for lazy rebuilding.
+#[derive(Clone)]
+pub struct VectorEntry {
+    pub dim: usize,
+    pub index: Arc<RwLock<HnswIndex>>,
+    pub rebuild_lock: Arc<std::sync::Mutex<()>>,
+    pub loaded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Process-wide handle to the stateful full-text and vector index structures.
@@ -130,7 +133,13 @@ impl SearchServices {
     pub fn define_vector(&self, name: &str, dim: usize, metric: DistanceMetric) -> Result<()> {
         let entry = VectorEntry {
             dim,
-            index: HnswIndex::new(dim, metric, HnswConfig::default()),
+            index: Arc::new(RwLock::new(HnswIndex::new(
+                dim,
+                metric,
+                HnswConfig::default(),
+            ))),
+            rebuild_lock: Arc::new(std::sync::Mutex::new(())),
+            loaded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         self.vectors
             .write()
@@ -139,24 +148,68 @@ impl SearchServices {
         Ok(())
     }
 
+    /// Atomic get-or-create vector index.
+    pub fn get_or_create_vector(
+        &self,
+        name: &str,
+        dim: usize,
+        metric: DistanceMetric,
+    ) -> Result<VectorEntry> {
+        let mut map = self.vectors.write().map_err(lock_err)?;
+        if let Some(entry) = map.get(name) {
+            return Ok(entry.clone());
+        }
+        let entry = VectorEntry {
+            dim,
+            index: Arc::new(RwLock::new(HnswIndex::new(
+                dim,
+                metric,
+                HnswConfig::default(),
+            ))),
+            rebuild_lock: Arc::new(std::sync::Mutex::new(())),
+            loaded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        map.insert(name.to_string(), entry.clone());
+        Ok(entry)
+    }
+
+    /// Mark a vector index's loaded state.
+    pub fn set_vector_loaded(&self, name: &str, loaded: bool) -> Result<()> {
+        let map = self.vectors.read().map_err(lock_err)?;
+        if let Some(entry) = map.get(name) {
+            entry
+                .loaded
+                .store(loaded, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
     /// Insert/replace a vector. Dimension mismatches are skipped silently
     /// (the document simply is not represented in the index).
     pub fn vector_insert(&self, name: &str, id: &str, vector: Vec<f32>) -> Result<()> {
-        let mut map = self.vectors.write().map_err(lock_err)?;
-        if let Some(entry) = map.get_mut(name)
-            && vector.len() == entry.dim
-        {
-            entry.index.remove(id);
-            entry.index.insert(id, vector);
+        let index_arc = {
+            let map = self.vectors.read().map_err(lock_err)?;
+            map.get(name)
+                .filter(|entry| vector.len() == entry.dim)
+                .map(|entry| Arc::clone(&entry.index))
+        };
+        if let Some(index) = index_arc {
+            let mut hnsw = index.write().map_err(lock_err)?;
+            hnsw.remove(id);
+            hnsw.insert(id, vector);
         }
         Ok(())
     }
 
     /// Remove a vector by id.
     pub fn vector_remove(&self, name: &str, id: &str) -> Result<()> {
-        let mut map = self.vectors.write().map_err(lock_err)?;
-        if let Some(entry) = map.get_mut(name) {
-            entry.index.remove(id);
+        let index_arc = {
+            let map = self.vectors.read().map_err(lock_err)?;
+            map.get(name).map(|entry| Arc::clone(&entry.index))
+        };
+        if let Some(index) = index_arc {
+            let mut hnsw = index.write().map_err(lock_err)?;
+            hnsw.remove(id);
         }
         Ok(())
     }
@@ -164,19 +217,22 @@ impl SearchServices {
     /// Search a vector index for the `k` nearest neighbors, returning
     /// `(id, distance)` ordered nearest-first.
     pub fn vector_search(&self, name: &str, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
-        let map = self.vectors.read().map_err(lock_err)?;
-        let entry = map
-            .get(name)
-            .ok_or_else(|| Error::Index(format!("vector index '{name}' is not loaded")))?;
-        if query.len() != entry.dim {
-            return Err(Error::Query(format!(
-                "query vector has dimension {}, index '{name}' expects {}",
-                query.len(),
-                entry.dim
-            )));
-        }
-        Ok(entry
-            .index
+        let index_arc = {
+            let map = self.vectors.read().map_err(lock_err)?;
+            let entry = map
+                .get(name)
+                .ok_or_else(|| Error::Index(format!("vector index '{name}' is not loaded")))?;
+            if query.len() != entry.dim {
+                return Err(Error::Query(format!(
+                    "query vector has dimension {}, index '{name}' expects {}",
+                    query.len(),
+                    entry.dim
+                )));
+            }
+            Arc::clone(&entry.index)
+        };
+        let hnsw = index_arc.read().map_err(lock_err)?;
+        Ok(hnsw
             .search(query, k)
             .into_iter()
             .map(|h| (h.id, h.distance))

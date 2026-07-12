@@ -2203,3 +2203,57 @@ fn hybrid_search_errors_without_services() {
             .is_err()
     );
 }
+
+#[test]
+fn test_concurrent_vector_index_lazy_rebuild() {
+    let (_dir, storage) = temp_storage();
+    let search_dir = tempfile::tempdir().unwrap();
+    let search = Arc::new(SearchServices::new(search_dir.path().join("search")));
+
+    let e = QueryExecutor::new_with_services(
+        &storage,
+        "ns",
+        "db",
+        Arc::new(ComputeCache::default()),
+        Arc::new(WriteVersions::default()),
+        Arc::clone(&search),
+    );
+    e.run("CREATE pt SET project = 'p1', emb = [1.0, 2.0];")
+        .unwrap();
+    e.run("CREATE pt SET project = 'p2', emb = [3.0, 4.0];")
+        .unwrap();
+    e.run("CREATE pt SET project = 'p3', emb = [5.0, 6.0];")
+        .unwrap();
+
+    e.run("DEFINE VECTOR INDEX vec ON pt FIELDS emb DIMENSION 2 METRIC euclidean;")
+        .unwrap();
+
+    // Create a fresh SearchServices to simulate a process restart (the in-memory HNSW index starts empty).
+    let fresh_search = Arc::new(SearchServices::new(search_dir.path().join("search")));
+
+    let mut handles = vec![];
+    let storage_arc = Arc::new(storage);
+    for _ in 0..10 {
+        let storage_clone = Arc::clone(&storage_arc);
+        let search_clone = Arc::clone(&fresh_search);
+        let h = std::thread::spawn(move || {
+            let exec = QueryExecutor::new_with_services(
+                &storage_clone,
+                "ns",
+                "db",
+                Arc::new(ComputeCache::default()),
+                Arc::new(WriteVersions::default()),
+                search_clone,
+            );
+            // Run vector search. This should trigger ensure_vector_loaded concurrently.
+            let (result, _) = exec.run("VECTOR SEARCH pt emb [1.0, 2.0] K 3").unwrap();
+            let rows = rows_of(result);
+            assert_eq!(rows.len(), 3);
+        });
+        handles.push(h);
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+}

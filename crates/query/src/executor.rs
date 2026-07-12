@@ -1407,6 +1407,7 @@ impl<'s> QueryExecutor<'s> {
                 services.vector_insert(name, &doc.id.id, v)?;
             }
         }
+        services.set_vector_loaded(name, true)?;
 
         Ok(QueryResult::Ok)
     }
@@ -1630,21 +1631,44 @@ impl<'s> QueryExecutor<'s> {
         let Some(services) = &self.services else {
             return Ok(());
         };
-        if services.vector_exists(&def.name)? {
+        let parsed_metric = search::parse_metric(metric)?;
+
+        // Atomically fetch or create the entry to prevent race conditions on setup.
+        let entry = services.get_or_create_vector(&def.name, dim, parsed_metric)?;
+
+        // If it is already loaded, we can return immediately.
+        if entry.loaded.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let parsed_metric = search::parse_metric(metric)?;
-        services.define_vector(&def.name, dim, parsed_metric)?;
+
+        // Lock to ensure only one thread performs the rebuild backfill.
+        let _guard = entry
+            .rebuild_lock
+            .lock()
+            .map_err(|_| dllb_core::Error::Index("vector rebuild lock poisoned".into()))?;
+
+        // Double-check after acquiring lock.
+        if entry.loaded.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
 
         let Some(field) = def.fields.first() else {
+            entry
+                .loaded
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         };
+
         let coll = Collection::new(self.storage, &self.ns, &self.db, table);
         for doc in coll.scan_all()? {
             if let Some(v) = doc.fields.get(field).and_then(search::value_to_vector) {
                 services.vector_insert(&def.name, &doc.id.id, v)?;
             }
         }
+
+        entry
+            .loaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
