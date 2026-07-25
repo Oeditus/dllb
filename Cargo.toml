@@ -65,5 +65,5 @@ rustyline = "15"
 marcli = { version = "0.1" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[patch.crates-io]
-redb = { path = "crates/redb-4.1.0" }
+# [patch.crates-io]
+# redb = { path = "crates/redb-4.1.0" }
