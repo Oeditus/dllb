@@ -8,6 +8,7 @@ description = "AST/MetaAST schemas, code-aware tokenizer, structural pattern mat
 [dependencies]
 dllb-core = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

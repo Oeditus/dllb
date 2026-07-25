@@ -25,7 +25,7 @@ pub enum Layer {
 ///
 /// Covers M2.1 Core (19 types), M2.2 Extended (14 types),
 /// M2.2s Structural (11 types), M2.3 Native (1 type), and Special (1 type).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NodeType {
     // -- M2.1 Core (all languages) --
     Literal,
@@ -251,7 +251,7 @@ impl NodeType {
 }
 
 /// A dynamically-typed metadata value in a MetaAST node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MetaValue {
     String(String),
     Int(i64),
@@ -264,7 +264,7 @@ pub enum MetaValue {
 }
 
 /// The children/value of a MetaAST node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NodeChildren {
     /// Leaf nodes: the actual value (for :literal, :variable, :comment, :param).
     Value(MetaValue),
@@ -275,7 +275,7 @@ pub enum NodeChildren {
 /// A single node in a MetaAST tree.
 ///
 /// Mirrors the Elixir 3-tuple `{type_atom, keyword_meta, children_or_value}`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MetaNode {
     pub node_type: NodeType,
     pub meta: Vec<(String, MetaValue)>,
@@ -444,5 +444,27 @@ mod tests {
         assert_eq!(binop.get_meta_str("operator"), Some("+"));
         assert_eq!(binop.child_nodes().len(), 2);
         assert_eq!(binop.layer(), Layer::Core);
+    }
+
+    #[test]
+    fn meta_node_serde_roundtrip() {
+        let left = MetaNode::leaf(NodeType::Variable, vec![], MetaValue::String("x".into()));
+        let right = MetaNode::leaf(
+            NodeType::Literal,
+            vec![("subtype".into(), MetaValue::Atom("integer".into()))],
+            MetaValue::Int(5),
+        );
+        let binop = MetaNode::composite(
+            NodeType::BinaryOp,
+            vec![
+                ("category".into(), MetaValue::Atom("arithmetic".into())),
+                ("operator".into(), MetaValue::Atom("+".into())),
+            ],
+            vec![left, right],
+        );
+
+        let json = serde_json::to_string(&binop).unwrap();
+        let deserialized: MetaNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(binop, deserialized);
     }
 }

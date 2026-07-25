@@ -102,6 +102,16 @@ pub fn ast_node_schema() -> TableDefinition {
                 field_type: FieldType::Vector(384),
                 required: false,
             },
+            FieldDefinition {
+                name: "docstring_embedding".into(),
+                field_type: FieldType::Vector(768),
+                required: false,
+            },
+            FieldDefinition {
+                name: "ast_serialized".into(),
+                field_type: FieldType::String,
+                required: false,
+            },
         ],
     }
 }
@@ -125,7 +135,7 @@ mod tests {
         let schema = ast_node_schema();
         assert_eq!(schema.name, "ast_node");
         assert_eq!(schema.schema_mode, SchemaMode::Schemafull);
-        assert_eq!(schema.fields.len(), 11);
+        assert_eq!(schema.fields.len(), 13);
 
         let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"name"));
@@ -133,6 +143,8 @@ mod tests {
         assert!(names.contains(&"language"));
         assert!(names.contains(&"source_embedding"));
         assert!(names.contains(&"structure_embedding"));
+        assert!(names.contains(&"docstring_embedding"));
+        assert!(names.contains(&"ast_serialized"));
     }
 
     #[test]
