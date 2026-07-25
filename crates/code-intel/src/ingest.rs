@@ -92,13 +92,14 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
     let mut local_fns = std::collections::HashMap::new();
     walk(root, &mut |n| {
         if n.node_type == NodeType::FunctionDef
-            && let Some(name) = n.get_meta_str("name") {
-                let arity = n.get_meta("arity").map_or(0, |v| match v {
-                    MetaValue::Int(i) => *i as usize,
-                    _ => 0,
-                });
-                local_fns.insert(name.to_string(), arity);
-            }
+            && let Some(name) = n.get_meta_str("name")
+        {
+            let arity = n.get_meta("arity").map_or(0, |v| match v {
+                MetaValue::Int(i) => *i as usize,
+                _ => 0,
+            });
+            local_fns.insert(name.to_string(), arity);
+        }
     });
 
     // Process container nodes at the top level and nested
