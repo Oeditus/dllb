@@ -290,12 +290,12 @@ fn parse_select(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
         // Graph traversal: ->edge->table[.field]  or  <-edge<-table[.field]
         SelectFields::Traversal(parse_traversal_chain(tokens, pos)?)
     } else {
-        let mut names = vec![expect_ident(tokens, pos)?];
+        let mut items = vec![parse_select_item(tokens, pos)?];
         while matches!(tokens.get(*pos), Some(Token::Comma)) {
             *pos += 1;
-            names.push(expect_ident(tokens, pos)?);
+            items.push(parse_select_item(tokens, pos)?);
         }
-        SelectFields::Named(names)
+        SelectFields::Named(items)
     };
 
     expect(tokens, pos, &Token::From)?;
@@ -777,7 +777,7 @@ fn parse_where_expr(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
 /// Parse a single `field op literal` comparison, or a `field IS [NOT] NONE`
 /// null predicate.
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
-    let field = expect_ident(tokens, pos)?;
+    let select_item = parse_select_item(tokens, pos)?;
 
     // `field IS [NOT] NONE`
     if matches!(tokens.get(*pos), Some(Token::Is)) {
@@ -789,12 +789,57 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
             false
         };
         expect(tokens, pos, &Token::None)?;
+        let field = match select_item {
+            SelectItem::Field(f) => f,
+            other => return Err(Error::Query(format!("expected field name before IS NONE, got {other:?}"))),
+        };
         return Ok(WhereClause::IsNull { field, negated });
     }
 
     let op = parse_cmp_op(tokens, pos)?;
     let value = parse_literal(tokens, pos)?;
-    Ok(WhereClause::Cmp { field, op, value })
+    Ok(WhereClause::Cmp { field: select_item, op, value })
+}
+
+fn parse_select_item(tokens: &[Token], pos: &mut usize) -> Result<SelectItem> {
+    match tokens.get(*pos) {
+        Some(Token::StringLit(_))
+        | Some(Token::IntLit(_))
+        | Some(Token::FloatLit(_))
+        | Some(Token::True)
+        | Some(Token::False)
+        | Some(Token::None)
+        | Some(Token::LBracket) => {
+            let lit = parse_literal(tokens, pos)?;
+            Ok(SelectItem::Literal(lit))
+        }
+        _ => {
+            let mut name = expect_ident(tokens, pos)?;
+            while matches!(tokens.get(*pos), Some(Token::Colon)) {
+                *pos += 1;
+                expect(tokens, pos, &Token::Colon)?;
+                let part = expect_ident(tokens, pos)?;
+                name.push_str("::");
+                name.push_str(&part);
+            }
+
+            if matches!(tokens.get(*pos), Some(Token::LParen)) {
+                *pos += 1; // consume LParen
+                let mut args = Vec::new();
+                if !matches!(tokens.get(*pos), Some(Token::RParen)) {
+                    args.push(parse_select_item(tokens, pos)?);
+                    while matches!(tokens.get(*pos), Some(Token::Comma)) {
+                        *pos += 1;
+                        args.push(parse_select_item(tokens, pos)?);
+                    }
+                }
+                expect(tokens, pos, &Token::RParen)?; // consume RParen
+                Ok(SelectItem::FunctionCall { name, args })
+            } else {
+                Ok(SelectItem::Field(name))
+            }
+        }
+    }
 }
 
 /// Parse a comparison operator token.
@@ -1174,11 +1219,11 @@ mod tests {
         match stmt("SELECT name FROM user WHERE age > 25 LIMIT 3") {
             Statement::Select {
                 fields: SelectFields::Named(names),
-                filter: Some(WhereClause::Cmp { field, op, value }),
+                filter: Some(WhereClause::Cmp { field: SelectItem::Field(field), op, value }),
                 limit: Some(3),
                 ..
             } => {
-                assert_eq!(names, vec!["name"]);
+                assert_eq!(names, vec![SelectItem::Field("name".to_string())]);
                 assert_eq!(field, "age");
                 assert_eq!(op, CmpOp::Gt);
                 assert_eq!(value, Literal::Int(25));
@@ -1215,7 +1260,7 @@ mod tests {
                 from: FromTarget::Record(r),
                 ..
             } => {
-                assert_eq!(f, vec!["name"]);
+                assert_eq!(f, vec![SelectItem::Field("name".to_string())]);
                 assert_eq!(r.table, "user");
                 assert_eq!(r.id, "alice");
             }
@@ -1229,7 +1274,7 @@ mod tests {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
-                        field,
+                        field: SelectItem::Field(field),
                         op: CmpOp::Eq,
                         value,
                     }),
@@ -1248,7 +1293,7 @@ mod tests {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
-                        field,
+                        field: SelectItem::Field(field),
                         op: CmpOp::Gt,
                         value,
                     }),
@@ -1267,7 +1312,7 @@ mod tests {
             Statement::Select {
                 filter:
                     Some(WhereClause::Cmp {
-                        field,
+                        field: SelectItem::Field(field),
                         op: CmpOp::Ne,
                         value,
                     }),

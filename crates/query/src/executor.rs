@@ -538,11 +538,11 @@ impl<'s> QueryExecutor<'s> {
             .map(|doc| {
                 let mut row = match select_fields {
                     SelectFields::All => doc.fields.clone(),
-                    SelectFields::Named(names) => {
+                    SelectFields::Named(items) => {
                         let mut m = BTreeMap::new();
-                        for name in names {
-                            if let Some(v) = doc.fields.get(name) {
-                                m.insert(name.clone(), v.clone());
+                        for item in items {
+                            if let Some(v) = eval_select_item(&doc, item) {
+                                m.insert(item.column_name(), v);
                             }
                         }
                         m
@@ -1953,6 +1953,9 @@ fn atom_of(clause: &WhereClause) -> Option<(&str, AtomKind)> {
     let WhereClause::Cmp { field, op, value } = clause else {
         return None;
     };
+    let SelectItem::Field(field_name) = field else {
+        return None;
+    };
     let v = value.to_value();
     if matches!(v, Value::Array(_) | Value::None) {
         return None;
@@ -1965,7 +1968,7 @@ fn atom_of(clause: &WhereClause) -> Option<(&str, AtomKind)> {
         CmpOp::Lte => AtomKind::Upper(v, true),
         CmpOp::Ne => return None,
     };
-    Some((field.as_str(), kind))
+    Some((field_name.as_str(), kind))
 }
 
 /// Assemble an `IndexPlan` for `idx` (leaving `covers` for the caller to set).
@@ -2101,32 +2104,73 @@ fn plan_for_index(idx: &IndexDefinition, conjuncts: &[&WhereClause]) -> Option<(
 // WHERE evaluation helpers
 // ---------------------------------------------------------------------------
 
+/// Evaluate a [`SelectItem`] expression against a document.
+fn eval_select_item(doc: &Document, item: &SelectItem) -> Option<Value> {
+    match item {
+        SelectItem::Field(name) => doc.fields.get(name).cloned(),
+        SelectItem::Literal(lit) => Some(lit.to_value()),
+        SelectItem::FunctionCall { name, args } => {
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for arg in args {
+                arg_vals.push(eval_select_item(doc, arg)?);
+            }
+
+            match name.as_str() {
+                "ast::complexity" => {
+                    if arg_vals.len() != 1 { return None; }
+                    let Value::String(ref json) = arg_vals[0] else { return None; };
+                    let node: dllb_code_intel::MetaNode = serde_json::from_str(json).ok()?;
+                    let complexity = dllb_code_intel::complexity_estimate(&node);
+                    Some(Value::Int(complexity as i64))
+                }
+                "ast::hash" => {
+                    if arg_vals.len() != 1 { return None; }
+                    let Value::String(ref json) = arg_vals[0] else { return None; };
+                    let node: dllb_code_intel::MetaNode = serde_json::from_str(json).ok()?;
+                    let hash = dllb_code_intel::subtree_hash(&node);
+                    Some(Value::Int(hash as i64))
+                }
+                "ast::similarity" => {
+                    if arg_vals.len() != 2 { return None; }
+                    let Value::String(ref ast_json) = arg_vals[0] else { return None; };
+                    let Value::String(ref query_json) = arg_vals[1] else { return None; };
+                    let a: dllb_code_intel::MetaNode = serde_json::from_str(ast_json).ok()?;
+                    let b: dllb_code_intel::MetaNode = serde_json::from_str(query_json).ok()?;
+                    let score = dllb_code_intel::structural_similarity(&a, &b);
+                    Some(Value::Float(score))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Evaluate a [`WhereClause`] against a document.
 fn matches_where(doc: &Document, clause: &WhereClause) -> bool {
     match clause {
         WhereClause::Cmp { field, op, value } => {
-            let Some(doc_val) = doc.fields.get(field) else {
+            let Some(doc_val) = eval_select_item(doc, field) else {
                 return false;
             };
             let target = value.to_value();
             match op {
-                CmpOp::Eq => doc_val == &target,
-                CmpOp::Ne => doc_val != &target,
+                CmpOp::Eq => doc_val == target,
+                CmpOp::Ne => doc_val != target,
                 CmpOp::Gt => {
                     matches!(
-                        cmp_values(doc_val, &target),
+                        cmp_values(&doc_val, &target),
                         Some(std::cmp::Ordering::Greater)
                     )
                 }
                 CmpOp::Lt => {
-                    matches!(cmp_values(doc_val, &target), Some(std::cmp::Ordering::Less))
+                    matches!(cmp_values(&doc_val, &target), Some(std::cmp::Ordering::Less))
                 }
                 CmpOp::Gte => matches!(
-                    cmp_values(doc_val, &target),
+                    cmp_values(&doc_val, &target),
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 ),
                 CmpOp::Lte => matches!(
-                    cmp_values(doc_val, &target),
+                    cmp_values(&doc_val, &target),
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 ),
             }

@@ -51,6 +51,8 @@ pub enum Token {
     Dot,       // .
     LBracket,  // [
     RBracket,  // ]
+    LParen,    // (
+    RParen,    // )
 }
 
 /// Tokenize an input string into a list of tokens.
@@ -168,6 +170,16 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
             }
             ']' => {
                 tokens.push(Token::RBracket);
+                i += 1;
+                continue;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+                continue;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
                 i += 1;
                 continue;
             }

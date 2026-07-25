@@ -210,13 +210,44 @@ pub enum CentralityMode {
     OutDegree,
 }
 
+/// A selected item: a field, a literal, or a function call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectItem {
+    Field(String),
+    Literal(Literal),
+    FunctionCall {
+        name: String,
+        args: Vec<SelectItem>,
+    },
+}
+
+impl SelectItem {
+    pub fn column_name(&self) -> String {
+        match self {
+            SelectItem::Field(name) => name.clone(),
+            SelectItem::Literal(lit) => match lit {
+                Literal::String(s) => format!("'{}'", s),
+                Literal::Int(n) => n.to_string(),
+                Literal::Float(f) => f.to_string(),
+                Literal::Bool(b) => b.to_string(),
+                Literal::None => "NONE".to_string(),
+                Literal::Array(arr) => format!("{:?}", arr),
+            },
+            SelectItem::FunctionCall { name, args } => {
+                let arg_strs: Vec<String> = args.iter().map(|a| a.column_name()).collect();
+                format!("{}({})", name, arg_strs.join(", "))
+            }
+        }
+    }
+}
+
 /// Which fields to return in a SELECT.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectFields {
     /// `SELECT *`
     All,
     /// `SELECT name, age`
-    Named(Vec<String>),
+    Named(Vec<SelectItem>),
     /// `SELECT ->edge->table[.field]` -- graph traversal projection.
     Traversal(TraversalChain),
 }
@@ -290,7 +321,7 @@ pub enum CmpOp {
 pub enum WhereClause {
     /// `field op value`  (e.g. `age >= 30`, `name != 'Bob'`)
     Cmp {
-        field: String,
+        field: SelectItem,
         op: CmpOp,
         value: Literal,
     },
