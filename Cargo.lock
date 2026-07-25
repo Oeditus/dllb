@@ -522,6 +522,7 @@ dependencies = [
 name = "dllb-query"
 version = "0.2.0"
 dependencies = [
+ "dllb-code-intel",
  "dllb-core",
  "dllb-document",
  "dllb-graph",
