@@ -20,6 +20,7 @@ pub struct AstDocument {
     pub source_text: Option<String>,
     pub signature: Option<String>,
     pub docstring: Option<String>,
+    pub ast_serialized: Option<String>,
 }
 
 /// A graph edge to be created between AST nodes.
@@ -81,11 +82,25 @@ fn escape_str(s: &str) -> String {
 /// - A document for each Container node (module/class) and FunctionDef node
 /// - Containment edges: container -> contains -> function
 /// - Import edges: container -> imports -> (stable ID from import source)
-/// - Call edges: function -> calls -> (stable ID from call target name)
+/// - Call edges: function -> calls -> (stable ID from call target name, resolved locally if defined in this file)
 pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> IngestBatch {
     let mut documents = Vec::new();
     let mut edges = Vec::new();
     let mut stats = IngestStats::default();
+
+    // 1. Scan for all local functions to resolve calls locally
+    let mut local_fns = std::collections::HashMap::new();
+    walk(root, &mut |n| {
+        if n.node_type == NodeType::FunctionDef {
+            if let Some(name) = n.get_meta_str("name") {
+                let arity = n.get_meta("arity").map_or(0, |v| match v {
+                    MetaValue::Int(i) => *i as usize,
+                    _ => 0,
+                });
+                local_fns.insert(name.to_string(), arity);
+            }
+        }
+    });
 
     // Process container nodes at the top level and nested
     walk(root, &mut |node| {
@@ -101,6 +116,7 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
             };
             let source_text = node.get_meta_str("source").map(String::from);
             let docstring = node.get_meta_str("doc").map(String::from);
+            let ast_serialized = serde_json::to_string(node).ok();
 
             let cid = container_id(file_path, &kind, &name);
 
@@ -115,6 +131,7 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                 source_text,
                 signature: None,
                 docstring,
+                ast_serialized,
             });
             stats.containers += 1;
 
@@ -122,6 +139,22 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
             let functions = extract_functions(node);
             for func in &functions {
                 let fid = function_id(file_path, &func.name, func.arity);
+
+                let mut func_source = None;
+                let mut func_doc = None;
+                let mut func_ast_serialized = None;
+
+                // Walk to find this specific FunctionDef node inside this container
+                walk(node, &mut |n| {
+                    if n.node_type == NodeType::FunctionDef
+                        && n.get_meta_str("name") == Some(&func.name)
+                        && n.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
+                    {
+                        func_source = n.get_meta_str("source").map(String::from);
+                        func_doc = n.get_meta_str("doc").map(String::from);
+                        func_ast_serialized = serde_json::to_string(n).ok();
+                    }
+                });
 
                 documents.push(AstDocument {
                     id: fid.clone(),
@@ -131,14 +164,15 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                     file_path: file_path.to_string(),
                     line_start: func.line,
                     line_end: None,
-                    source_text: None,
+                    source_text: func_source,
                     signature: Some(format!(
                         "{}({}) [{}]",
                         func.name,
                         func.params.join(", "),
                         func.visibility
                     )),
-                    docstring: None,
+                    docstring: func_doc,
+                    ast_serialized: func_ast_serialized,
                 });
                 stats.functions += 1;
 
@@ -168,14 +202,18 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
             for func in &functions {
                 let fid = function_id(file_path, &func.name, func.arity);
                 // Walk the function's subtree to find calls
-                // We need to find the FunctionDef node for this function
-                for child in node.child_nodes() {
+                walk(node, &mut |child| {
                     if child.node_type == NodeType::FunctionDef
                         && child.get_meta_str("name") == Some(&func.name)
+                        && child.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
                     {
                         let calls = extract_calls(child);
                         for call in &calls {
-                            let tid = call_target_id(call);
+                            let tid = if let Some(local_arity) = local_fns.get(call) {
+                                function_id(file_path, call, *local_arity)
+                            } else {
+                                call_target_id(call)
+                            };
                             edges.push(AstEdge {
                                 from_id: fid.clone(),
                                 edge_type: EDGE_CALLS.to_string(),
@@ -185,7 +223,7 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                             stats.edges += 1;
                         }
                     }
-                }
+                });
             }
         }
     });
@@ -196,6 +234,21 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
         for func in &functions {
             let fid = function_id(file_path, &func.name, func.arity);
 
+            let mut func_source = None;
+            let mut func_doc = None;
+            let mut func_ast_serialized = None;
+
+            walk(root, &mut |n| {
+                if n.node_type == NodeType::FunctionDef
+                    && n.get_meta_str("name") == Some(&func.name)
+                    && n.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
+                {
+                    func_source = n.get_meta_str("source").map(String::from);
+                    func_doc = n.get_meta_str("doc").map(String::from);
+                    func_ast_serialized = serde_json::to_string(n).ok();
+                }
+            });
+
             documents.push(AstDocument {
                 id: fid.clone(),
                 name: func.name.clone(),
@@ -204,20 +257,25 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                 file_path: file_path.to_string(),
                 line_start: func.line,
                 line_end: None,
-                source_text: None,
+                source_text: func_source,
                 signature: Some(format!(
                     "{}({}) [{}]",
                     func.name,
                     func.params.join(", "),
                     func.visibility
                 )),
-                docstring: None,
+                docstring: func_doc,
+                ast_serialized: func_ast_serialized,
             });
             stats.functions += 1;
 
             let calls = extract_calls(root);
             for call in &calls {
-                let tid = call_target_id(call);
+                let tid = if let Some(local_arity) = local_fns.get(call) {
+                    function_id(file_path, call, *local_arity)
+                } else {
+                    call_target_id(call)
+                };
                 edges.push(AstEdge {
                     from_id: fid.clone(),
                     edge_type: EDGE_CALLS.to_string(),
@@ -271,6 +329,9 @@ pub fn generate_dllb_queries(batch: &IngestBatch) -> Vec<String> {
         }
         if let Some(ref ds) = doc.docstring {
             sets.push(format!("docstring = '{}'", escape_str(ds)));
+        }
+        if let Some(ref ast) = doc.ast_serialized {
+            sets.push(format!("ast_serialized = '{}'", escape_str(ast)));
         }
 
         queries.push(format!(
@@ -572,5 +633,67 @@ mod tests {
         // The name with a quote should be escaped
         let create = queries.iter().find(|q| q.starts_with("CREATE")).unwrap();
         assert!(create.contains("O''Reilly"));
+    }
+
+    #[test]
+    fn prepare_batch_local_call_resolution_and_serialization() {
+        let callee_fn = MetaNode::composite(
+            NodeType::FunctionDef,
+            vec![
+                ("name".into(), MetaValue::String("callee".into())),
+                ("arity".into(), MetaValue::Int(0)),
+                ("visibility".into(), MetaValue::Atom("public".into())),
+                ("params".into(), MetaValue::List(vec![])),
+                ("source".into(), MetaValue::String("def callee(), do: nil".into())),
+                ("doc".into(), MetaValue::String("My docstring".into())),
+            ],
+            vec![
+                MetaNode::leaf(NodeType::Literal, vec![], MetaValue::Atom("nil".into()))
+            ],
+        );
+
+        let caller_fn = MetaNode::composite(
+            NodeType::FunctionDef,
+            vec![
+                ("name".into(), MetaValue::String("caller".into())),
+                ("arity".into(), MetaValue::Int(0)),
+                ("visibility".into(), MetaValue::Atom("public".into())),
+                ("params".into(), MetaValue::List(vec![])),
+                ("source".into(), MetaValue::String("def caller(), do: callee()".into())),
+            ],
+            vec![
+                MetaNode::composite(
+                    NodeType::FunctionCall,
+                    vec![("name".into(), MetaValue::String("callee".into()))],
+                    vec![],
+                )
+            ],
+        );
+
+        let container = MetaNode::composite(
+            NodeType::Container,
+            vec![
+                ("container_type".into(), MetaValue::Atom("module".into())),
+                ("name".into(), MetaValue::String("LocalCallApp".into())),
+            ],
+            vec![callee_fn, caller_fn],
+        );
+
+        let batch = prepare_batch(&container, "lib/local_call_app.ex", "elixir");
+
+        // Should serialize container AST
+        assert!(batch.documents[0].ast_serialized.is_some());
+        
+        // Should serialize function ASTs, source, and docs
+        let callee_doc = batch.documents.iter().find(|d| d.name == "callee").unwrap();
+        assert_eq!(callee_doc.source_text.as_deref(), Some("def callee(), do: nil"));
+        assert_eq!(callee_doc.docstring.as_deref(), Some("My docstring"));
+        assert!(callee_doc.ast_serialized.is_some());
+
+        // Should resolve call locally (callee is a local function with arity 0)
+        let call_edges: Vec<_> = batch.edges.iter().filter(|e| e.edge_type == "calls").collect();
+        assert_eq!(call_edges.len(), 1);
+        assert_eq!(call_edges[0].from_id, "lib/local_call_app.ex::caller/0");
+        assert_eq!(call_edges[0].to_id, "lib/local_call_app.ex::callee/0"); // Resolved locally!
     }
 }
