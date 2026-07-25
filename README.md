@@ -18,6 +18,17 @@
 
 ---
 
+> [!IMPORTANT]
+> **Pre-release Note (v1.0.0-rc.0)**: This is the first Release Candidate for `dllb` 1.0.0. The prototype core is complete, implementing stable APIs for documents, graphs, Tantivy-powered search, and HNSW vector indexing.
+
+### Modern Features (v1.0.0-rc.0)
+- **Zero-Copy & Zero-Dependency Engine**: Built on pure Rust `redb` for ACID transactions and thread-safe MVCC reads without dynamic C links.
+- **Unified Key Encoding**: Maps document, graph, index, and metadata entries into a single sorted keyspace; scans use highly efficient binary prefix range checks.
+- **Supervised Actor Architecture**: Powered by `joerl` (Erlang/OTP patterns in Rust), ensuring stateful subsystems (storage, indexing) recover automatically from failures.
+- **AST & Code Intel Native**: Predefined schemas and a code-aware tokenization pipeline designed for source code analysis.
+- **SQL AST Functions**: Native SQL extensions like `ast::complexity`, `ast::hash`, and `ast::similarity` to perform structural clone and pattern analyses directly inside the database.
+- **Hybrid Search**: Fuses BM25 text relevance and HNSW approximate nearest-neighbor vector similarity with optional server-side metadata constraints.
+
 ## What is dllb?
 
 **dllb** is a multi-model NoSQL database management system that natively supports
