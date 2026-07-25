@@ -262,4 +262,3 @@ fn multi_get_preserves_order_and_marks_absent() {
         .unwrap();
     assert_eq!(got, vec![Some(b"A".to_vec()), None, Some(b"C".to_vec())]);
 }
-

@@ -91,15 +91,14 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
     // 1. Scan for all local functions to resolve calls locally
     let mut local_fns = std::collections::HashMap::new();
     walk(root, &mut |n| {
-        if n.node_type == NodeType::FunctionDef {
-            if let Some(name) = n.get_meta_str("name") {
+        if n.node_type == NodeType::FunctionDef
+            && let Some(name) = n.get_meta_str("name") {
                 let arity = n.get_meta("arity").map_or(0, |v| match v {
                     MetaValue::Int(i) => *i as usize,
                     _ => 0,
                 });
                 local_fns.insert(name.to_string(), arity);
             }
-        }
     });
 
     // Process container nodes at the top level and nested
@@ -148,7 +147,10 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                 walk(node, &mut |n| {
                     if n.node_type == NodeType::FunctionDef
                         && n.get_meta_str("name") == Some(&func.name)
-                        && n.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
+                        && n.get_meta("arity").map_or(0, |v| match v {
+                            MetaValue::Int(i) => *i as usize,
+                            _ => 0,
+                        }) == func.arity
                     {
                         func_source = n.get_meta_str("source").map(String::from);
                         func_doc = n.get_meta_str("doc").map(String::from);
@@ -205,7 +207,10 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
                 walk(node, &mut |child| {
                     if child.node_type == NodeType::FunctionDef
                         && child.get_meta_str("name") == Some(&func.name)
-                        && child.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
+                        && child.get_meta("arity").map_or(0, |v| match v {
+                            MetaValue::Int(i) => *i as usize,
+                            _ => 0,
+                        }) == func.arity
                     {
                         let calls = extract_calls(child);
                         for call in &calls {
@@ -241,7 +246,10 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
             walk(root, &mut |n| {
                 if n.node_type == NodeType::FunctionDef
                     && n.get_meta_str("name") == Some(&func.name)
-                    && n.get_meta("arity").map_or(0, |v| match v { MetaValue::Int(i) => *i as usize, _ => 0 }) == func.arity
+                    && n.get_meta("arity").map_or(0, |v| match v {
+                        MetaValue::Int(i) => *i as usize,
+                        _ => 0,
+                    }) == func.arity
                 {
                     func_source = n.get_meta_str("source").map(String::from);
                     func_doc = n.get_meta_str("doc").map(String::from);
@@ -644,12 +652,17 @@ mod tests {
                 ("arity".into(), MetaValue::Int(0)),
                 ("visibility".into(), MetaValue::Atom("public".into())),
                 ("params".into(), MetaValue::List(vec![])),
-                ("source".into(), MetaValue::String("def callee(), do: nil".into())),
+                (
+                    "source".into(),
+                    MetaValue::String("def callee(), do: nil".into()),
+                ),
                 ("doc".into(), MetaValue::String("My docstring".into())),
             ],
-            vec![
-                MetaNode::leaf(NodeType::Literal, vec![], MetaValue::Atom("nil".into()))
-            ],
+            vec![MetaNode::leaf(
+                NodeType::Literal,
+                vec![],
+                MetaValue::Atom("nil".into()),
+            )],
         );
 
         let caller_fn = MetaNode::composite(
@@ -659,15 +672,16 @@ mod tests {
                 ("arity".into(), MetaValue::Int(0)),
                 ("visibility".into(), MetaValue::Atom("public".into())),
                 ("params".into(), MetaValue::List(vec![])),
-                ("source".into(), MetaValue::String("def caller(), do: callee()".into())),
+                (
+                    "source".into(),
+                    MetaValue::String("def caller(), do: callee()".into()),
+                ),
             ],
-            vec![
-                MetaNode::composite(
-                    NodeType::FunctionCall,
-                    vec![("name".into(), MetaValue::String("callee".into()))],
-                    vec![],
-                )
-            ],
+            vec![MetaNode::composite(
+                NodeType::FunctionCall,
+                vec![("name".into(), MetaValue::String("callee".into()))],
+                vec![],
+            )],
         );
 
         let container = MetaNode::composite(
@@ -683,15 +697,22 @@ mod tests {
 
         // Should serialize container AST
         assert!(batch.documents[0].ast_serialized.is_some());
-        
+
         // Should serialize function ASTs, source, and docs
         let callee_doc = batch.documents.iter().find(|d| d.name == "callee").unwrap();
-        assert_eq!(callee_doc.source_text.as_deref(), Some("def callee(), do: nil"));
+        assert_eq!(
+            callee_doc.source_text.as_deref(),
+            Some("def callee(), do: nil")
+        );
         assert_eq!(callee_doc.docstring.as_deref(), Some("My docstring"));
         assert!(callee_doc.ast_serialized.is_some());
 
         // Should resolve call locally (callee is a local function with arity 0)
-        let call_edges: Vec<_> = batch.edges.iter().filter(|e| e.edge_type == "calls").collect();
+        let call_edges: Vec<_> = batch
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == "calls")
+            .collect();
         assert_eq!(call_edges.len(), 1);
         assert_eq!(call_edges[0].from_id, "lib/local_call_app.ex::caller/0");
         assert_eq!(call_edges[0].to_id, "lib/local_call_app.ex::callee/0"); // Resolved locally!

@@ -215,10 +215,7 @@ pub enum CentralityMode {
 pub enum SelectItem {
     Field(String),
     Literal(Literal),
-    FunctionCall {
-        name: String,
-        args: Vec<SelectItem>,
-    },
+    FunctionCall { name: String, args: Vec<SelectItem> },
 }
 
 impl SelectItem {

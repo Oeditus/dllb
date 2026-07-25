@@ -2117,23 +2117,37 @@ fn eval_select_item(doc: &Document, item: &SelectItem) -> Option<Value> {
 
             match name.as_str() {
                 "ast::complexity" => {
-                    if arg_vals.len() != 1 { return None; }
-                    let Value::String(ref json) = arg_vals[0] else { return None; };
+                    if arg_vals.len() != 1 {
+                        return None;
+                    }
+                    let Value::String(ref json) = arg_vals[0] else {
+                        return None;
+                    };
                     let node: dllb_code_intel::MetaNode = serde_json::from_str(json).ok()?;
                     let complexity = dllb_code_intel::complexity_estimate(&node);
                     Some(Value::Int(complexity as i64))
                 }
                 "ast::hash" => {
-                    if arg_vals.len() != 1 { return None; }
-                    let Value::String(ref json) = arg_vals[0] else { return None; };
+                    if arg_vals.len() != 1 {
+                        return None;
+                    }
+                    let Value::String(ref json) = arg_vals[0] else {
+                        return None;
+                    };
                     let node: dllb_code_intel::MetaNode = serde_json::from_str(json).ok()?;
                     let hash = dllb_code_intel::subtree_hash(&node);
                     Some(Value::Int(hash as i64))
                 }
                 "ast::similarity" => {
-                    if arg_vals.len() != 2 { return None; }
-                    let Value::String(ref ast_json) = arg_vals[0] else { return None; };
-                    let Value::String(ref query_json) = arg_vals[1] else { return None; };
+                    if arg_vals.len() != 2 {
+                        return None;
+                    }
+                    let Value::String(ref ast_json) = arg_vals[0] else {
+                        return None;
+                    };
+                    let Value::String(ref query_json) = arg_vals[1] else {
+                        return None;
+                    };
                     let a: dllb_code_intel::MetaNode = serde_json::from_str(ast_json).ok()?;
                     let b: dllb_code_intel::MetaNode = serde_json::from_str(query_json).ok()?;
                     let score = dllb_code_intel::structural_similarity(&a, &b);
@@ -2163,7 +2177,10 @@ fn matches_where(doc: &Document, clause: &WhereClause) -> bool {
                     )
                 }
                 CmpOp::Lt => {
-                    matches!(cmp_values(&doc_val, &target), Some(std::cmp::Ordering::Less))
+                    matches!(
+                        cmp_values(&doc_val, &target),
+                        Some(std::cmp::Ordering::Less)
+                    )
                 }
                 CmpOp::Gte => matches!(
                     cmp_values(&doc_val, &target),

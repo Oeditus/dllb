@@ -791,14 +791,22 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<WhereClause> {
         expect(tokens, pos, &Token::None)?;
         let field = match select_item {
             SelectItem::Field(f) => f,
-            other => return Err(Error::Query(format!("expected field name before IS NONE, got {other:?}"))),
+            other => {
+                return Err(Error::Query(format!(
+                    "expected field name before IS NONE, got {other:?}"
+                )));
+            }
         };
         return Ok(WhereClause::IsNull { field, negated });
     }
 
     let op = parse_cmp_op(tokens, pos)?;
     let value = parse_literal(tokens, pos)?;
-    Ok(WhereClause::Cmp { field: select_item, op, value })
+    Ok(WhereClause::Cmp {
+        field: select_item,
+        op,
+        value,
+    })
 }
 
 fn parse_select_item(tokens: &[Token], pos: &mut usize) -> Result<SelectItem> {
@@ -1219,7 +1227,12 @@ mod tests {
         match stmt("SELECT name FROM user WHERE age > 25 LIMIT 3") {
             Statement::Select {
                 fields: SelectFields::Named(names),
-                filter: Some(WhereClause::Cmp { field: SelectItem::Field(field), op, value }),
+                filter:
+                    Some(WhereClause::Cmp {
+                        field: SelectItem::Field(field),
+                        op,
+                        value,
+                    }),
                 limit: Some(3),
                 ..
             } => {

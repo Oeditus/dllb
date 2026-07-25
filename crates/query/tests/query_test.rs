@@ -2260,7 +2260,7 @@ fn test_concurrent_vector_index_lazy_rebuild() {
 
 #[test]
 fn test_ast_builtins_integration() {
-    let (dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage();
     let e = exec(&storage);
 
     // Create a MetaAST representing a function:
@@ -2278,13 +2278,19 @@ fn test_ast_builtins_integration() {
     );
     let binop = dllb_code_intel::MetaNode::composite(
         dllb_code_intel::NodeType::BinaryOp,
-        vec![("operator".into(), dllb_code_intel::MetaValue::Atom("+".into()))],
+        vec![(
+            "operator".into(),
+            dllb_code_intel::MetaValue::Atom("+".into()),
+        )],
         vec![left, right],
     );
     let func = dllb_code_intel::MetaNode::composite(
         dllb_code_intel::NodeType::FunctionDef,
         vec![
-            ("name".into(), dllb_code_intel::MetaValue::String("add".into())),
+            (
+                "name".into(),
+                dllb_code_intel::MetaValue::String("add".into()),
+            ),
             ("arity".into(), dllb_code_intel::MetaValue::Int(2)),
         ],
         vec![binop],
@@ -2296,18 +2302,24 @@ fn test_ast_builtins_integration() {
     e.run(&format!(
         "CREATE ast_node:add SET name = 'add', kind = 'function_def', ast_serialized = '{}';",
         ast_json.replace('\'', "''")
-    )).unwrap();
+    ))
+    .unwrap();
 
     // 1. SELECT complexity and hash
-    let (result, _) = e.run("SELECT ast::complexity(ast_serialized), ast::hash(ast_serialized) FROM ast_node:add;").unwrap();
+    let (result, _) = e
+        .run("SELECT ast::complexity(ast_serialized), ast::hash(ast_serialized) FROM ast_node:add;")
+        .unwrap();
     let rows = rows_of(result);
     assert_eq!(rows.len(), 1);
-    
+
     // Check column names and values
     let row = &rows[0];
-    assert_eq!(row.get("ast::complexity(ast_serialized)"), Some(&Value::Int(1))); // 1 branch (base complexity)
+    assert_eq!(
+        row.get("ast::complexity(ast_serialized)"),
+        Some(&Value::Int(1))
+    ); // 1 branch (base complexity)
     assert!(row.contains_key("ast::hash(ast_serialized)"));
-    
+
     // 2. Query with ast::similarity in SELECT
     let query_ast_json = ast_json.clone();
     let q = format!(
@@ -2322,13 +2334,20 @@ fn test_ast_builtins_integration() {
     assert_eq!(sim_val, &Value::Float(1.0)); // Identical structure should be 1.0!
 
     // 3. WHERE clause filter using ast::complexity
-    let (res_filter, _) = e.run("SELECT name FROM ast_node WHERE ast::complexity(ast_serialized) = 1;").unwrap();
+    let (res_filter, _) = e
+        .run("SELECT name FROM ast_node WHERE ast::complexity(ast_serialized) = 1;")
+        .unwrap();
     let rows_filter = rows_of(res_filter);
     assert_eq!(rows_filter.len(), 1);
-    assert_eq!(rows_filter[0].get("name"), Some(&Value::String("add".into())));
+    assert_eq!(
+        rows_filter[0].get("name"),
+        Some(&Value::String("add".into()))
+    );
 
     // WHERE clause filter rejecting
-    let (res_filter_empty, _) = e.run("SELECT name FROM ast_node WHERE ast::complexity(ast_serialized) > 5;").unwrap();
+    let (res_filter_empty, _) = e
+        .run("SELECT name FROM ast_node WHERE ast::complexity(ast_serialized) > 5;")
+        .unwrap();
     let rows_filter_empty = rows_of(res_filter_empty);
     assert_eq!(rows_filter_empty.len(), 0);
 }
