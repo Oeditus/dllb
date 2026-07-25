@@ -82,20 +82,55 @@ AST storage pattern:
 
 ```rust
 let schema = ast_node_schema();
-// 11 fields: name, kind, language, file_path, line_start, line_end,
-// source_text, signature, docstring, source_embedding(768), structure_embedding(384)
+// 13 fields: name, kind, language, file_path, line_start, line_end,
+// source_text, signature, docstring, source_embedding(768),
+// structure_embedding(384), docstring_embedding(768), ast_serialized
 ```
 
 ### Edge Type Constants
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `EDGE_CALLS` | `"calls"` | Function calls another function |
+| `EDGE_CALLS` | `"calls"` | Function calls another function (resolved to local function ID if defined in the same file) |
 | `EDGE_CONTAINS` | `"contains"` | Module contains function |
 | `EDGE_RETURNS` | `"returns"` | Function returns a type |
 | `EDGE_IMPORTS` | `"imports"` | Module imports another |
 | `EDGE_OVERRIDES` | `"overrides"` | Function overrides parent |
 | `EDGE_EXEMPLIFIES` | `"exemplifies"` | Node exemplifies a pattern |
+
+## Ingestion Pipeline Enhancements
+
+The ingestion pipeline automatically:
+1. **Serializes AST Subtrees**: The `ast_serialized` field is populated with the complete JSON-serialized subtree for containers and functions.
+2. **Local Call-Graph Resolution**: Function calls inside a file are matched against local function definitions. If matched, the `calls` edge points directly to the target function's `ast_node` document ID (e.g. `lib/app.ex::callee/0`) instead of a generic placeholder, creating a fully connected call graph.
+3. **Expanded Function Metadata**: `source_text` and `docstring` are fully extracted and stored for both containers and individual functions.
+
+## SQL-Integrated AST Functions
+
+`dllb_query` exposes structural AST functions that can be used in `SELECT` projections or `WHERE` filter conditions:
+
+### 1. `ast::complexity(ast_serialized)`
+Estimates the cyclomatic complexity of the AST subtree by counting control flow branch points (loops, conditionals, match arms).
+```sql
+SELECT name, ast::complexity(ast_serialized) AS complexity
+  FROM ast_node
+  WHERE kind = 'function_def' AND ast::complexity(ast_serialized) > 10;
+```
+
+### 2. `ast::hash(ast_serialized)`
+Computes a structural Zobrist-style hash of the AST subtree skeleton, ignoring variable names and literal values. Structurally identical code blocks yield identical hashes.
+```sql
+SELECT id, ast::hash(ast_serialized) FROM ast_node;
+```
+
+### 3. `ast::similarity(ast_serialized, target_ast_json)`
+Computes the structural similarity score (`0.0..=1.0`) between two AST subtrees using greedy best-match pairing of node types.
+```sql
+SELECT id, name, ast::similarity(ast_serialized, '{...}') AS similarity
+  FROM ast_node
+  WHERE ast::similarity(ast_serialized, '{...}') >= 0.85
+  ORDER BY similarity DESC;
+```
 
 ## Extraction Utilities
 
@@ -122,8 +157,7 @@ These enable the pipeline:
 
 ```bash
 cargo test -p dllb-code-intel
+cargo test -p dllb-query
 ```
 
-18 tests: 16 unit (node types, layer classification, MetaNode construction,
-tokenizer splits, schema validation, extraction from sample trees) +
-2 integration (full pipeline MetaAST -> documents + edges, schema validation).
+Testing includes comprehensive units for AST serialization, local call-graph target resolution, built-in SQL function evaluation, and query parser updates.
