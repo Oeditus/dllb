@@ -7,10 +7,12 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Serialize};
+
 use crate::meta_ast::{MetaNode, NodeChildren};
 
 /// A pair of subtrees identified as structural clones.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClonePair {
     pub index_a: usize,
     pub index_b: usize,

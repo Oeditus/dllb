@@ -2153,6 +2153,56 @@ fn eval_select_item(doc: &Document, item: &SelectItem) -> Option<Value> {
                     let score = dllb_code_intel::structural_similarity(&a, &b);
                     Some(Value::Float(score))
                 }
+                "ast::diff" => {
+                    if arg_vals.len() != 2 {
+                        return None;
+                    }
+                    let Value::String(ref ast_json_a) = arg_vals[0] else {
+                        return None;
+                    };
+                    let Value::String(ref ast_json_b) = arg_vals[1] else {
+                        return None;
+                    };
+                    let a: dllb_code_intel::MetaNode = serde_json::from_str(ast_json_a).ok()?;
+                    let b: dllb_code_intel::MetaNode = serde_json::from_str(ast_json_b).ok()?;
+                    let summary = dllb_code_intel::diff_trees(&a, &b);
+                    let json = serde_json::to_string(&summary).ok()?;
+                    Some(Value::String(json))
+                }
+                "ast::scope" => {
+                    if arg_vals.len() != 2 {
+                        return None;
+                    }
+                    let Value::String(ref json) = arg_vals[0] else {
+                        return None;
+                    };
+                    let line = match arg_vals[1] {
+                        Value::Int(i) => i,
+                        _ => return None,
+                    };
+                    let node: dllb_code_intel::MetaNode = serde_json::from_str(json).ok()?;
+                    let scope = dllb_code_intel::scope_at(&node, line);
+                    let json = serde_json::to_string(&scope).ok()?;
+                    Some(Value::String(json))
+                }
+                "ast::clones" => {
+                    if arg_vals.len() != 2 {
+                        return None;
+                    }
+                    let Value::String(ref json_arr) = arg_vals[0] else {
+                        return None;
+                    };
+                    let threshold = match arg_vals[1] {
+                        Value::Float(f) => f,
+                        Value::Int(i) => i as f64,
+                        _ => 0.8,
+                    };
+                    let nodes: Vec<dllb_code_intel::MetaNode> = serde_json::from_str(json_arr).ok()?;
+                    let node_refs: Vec<&dllb_code_intel::MetaNode> = nodes.iter().collect();
+                    let clones = dllb_code_intel::find_clones(&node_refs, threshold);
+                    let json = serde_json::to_string(&clones).ok()?;
+                    Some(Value::String(json))
+                }
                 _ => None,
             }
         }

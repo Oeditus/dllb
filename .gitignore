@@ -33,3 +33,14 @@ tarpaulin-report.html
 
 # Benchmarks output
 criterion/
+
+# Internals
+.dllb.pid
+dllb.log
+
+# Elixir
+.erl.history/
+
+# Docker
+.dockerignore
+Dockerfile

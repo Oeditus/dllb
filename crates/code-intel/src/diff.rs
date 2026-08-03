@@ -8,10 +8,12 @@
 //! the functions/modules that actually changed need re-embedding and re-insertion
 //! into dllb.
 
+use serde::{Deserialize, Serialize};
+
 use crate::meta_ast::{MetaNode, MetaValue, NodeChildren, NodeType};
 
 /// A single change detected between two AST versions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AstChange {
     /// What kind of change occurred.
     pub kind: ChangeKind,
@@ -24,7 +26,7 @@ pub struct AstChange {
 }
 
 /// Classification of an AST change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeKind {
     /// A new entity was added.
     Added,
@@ -37,7 +39,7 @@ pub enum ChangeKind {
 }
 
 /// Summary of all changes between two AST versions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiffSummary {
     pub changes: Vec<AstChange>,
     pub added: usize,
