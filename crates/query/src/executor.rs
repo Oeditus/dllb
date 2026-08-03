@@ -2197,7 +2197,8 @@ fn eval_select_item(doc: &Document, item: &SelectItem) -> Option<Value> {
                         Value::Int(i) => i as f64,
                         _ => 0.8,
                     };
-                    let nodes: Vec<dllb_code_intel::MetaNode> = serde_json::from_str(json_arr).ok()?;
+                    let nodes: Vec<dllb_code_intel::MetaNode> =
+                        serde_json::from_str(json_arr).ok()?;
                     let node_refs: Vec<&dllb_code_intel::MetaNode> = nodes.iter().collect();
                     let clones = dllb_code_intel::find_clones(&node_refs, threshold);
                     let json = serde_json::to_string(&clones).ok()?;
