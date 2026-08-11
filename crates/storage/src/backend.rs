@@ -45,6 +45,15 @@ impl RedbBackend {
     pub fn db_handle(&self) -> Arc<Database> {
         Arc::clone(&self.db)
     }
+
+    /// Compact the underlying redb database to reclaim free space.
+    pub fn compact(&self) -> Result<bool> {
+        if let Some(db) = Arc::get_mut(&mut self.db.clone()) {
+            db.compact().map_err(map_err)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 impl KvStore for RedbBackend {

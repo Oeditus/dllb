@@ -41,6 +41,11 @@ impl DllbStorage {
         self.backend.db_handle()
     }
 
+    /// Compact the underlying database to reclaim free space.
+    pub fn compact(&self) -> Result<bool> {
+        self.backend.compact()
+    }
+
     // ---------------------------------------------------------------
     // Write operations (will route through actor in a later step)
     // ---------------------------------------------------------------

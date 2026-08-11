@@ -118,6 +118,8 @@ pub enum Statement {
     /// `REMOVE INDEX <name> ON [TABLE] <table>` -- drop an index and all its
     /// entries.
     RemoveIndex { name: String, table: String },
+    /// `COMPACT` -- Compact database file to reclaim free space.
+    Compact,
     /// `DEFINE FULLTEXT INDEX <name> ON [TABLE] <table> FIELDS <field> [ANALYZER <name>]`
     DefineFulltextIndex {
         name: String,

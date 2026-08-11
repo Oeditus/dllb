@@ -192,6 +192,10 @@ impl<'s> QueryExecutor<'s> {
                 unique,
             } => self.exec_define_index(name, table, fields, *unique),
             Statement::RemoveIndex { name, table } => self.exec_remove_index(name, table),
+            Statement::Compact => {
+                self.storage.compact()?;
+                Ok(QueryResult::Ok)
+            }
             Statement::DefineFulltextIndex {
                 name,
                 table,

@@ -46,6 +46,7 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
             parse_vector_search(tokens, pos)
         }
         Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("HYBRID") => parse_hybrid(tokens, pos),
+        Some(Token::Ident(kw)) if kw.eq_ignore_ascii_case("COMPACT") => parse_compact(tokens, pos),
         Some(t) => Err(Error::Query(format!("expected statement, got {t:?}"))),
         None => Err(Error::Query("empty input".into())),
     }
@@ -55,6 +56,11 @@ fn parse_statement(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
 // DEFINE INDEX <name> ON [TABLE] <table> FIELDS <field>[, ...] [UNIQUE]
 // REMOVE INDEX <name> ON [TABLE] <table>
 // -----------------------------------------------------------------------
+
+fn parse_compact(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
+    expect_keyword(tokens, pos, "COMPACT")?;
+    Ok(Statement::Compact)
+}
 
 fn parse_define(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect_keyword(tokens, pos, "DEFINE")?;
