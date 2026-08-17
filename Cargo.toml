@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 license = "MIT"
 authors = ["Aleksei Matiushkin <am@mudasobwa.ru>"]
@@ -52,6 +52,8 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 
 # Utilities
+# Cache & Utilities
+lru = "0.13"
 uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
 crc32fast = "1"
@@ -64,6 +66,7 @@ half = { version = "2", features = ["serde"] }
 rustyline = "15"
 marcli = { version = "0.1" }
 criterion = { version = "0.5", features = ["html_reports"] }
+tikv-jemallocator = "0.6"
 
 # [patch.crates-io]
 # redb = { path = "crates/redb-4.1.0" }

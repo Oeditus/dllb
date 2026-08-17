@@ -15,6 +15,7 @@ dllb-search = { workspace = true }
 dllb-code-intel = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -28,8 +28,11 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+use lru::LruCache;
 
 use crate::ast::OutcomeFormat;
 
@@ -205,37 +208,150 @@ struct CacheEntry {
     payload: String,
     /// Write version of the source table at the time of computation.
     version: u64,
+    /// Total estimated byte size of this entry (payload string + key overhead).
+    bytes: usize,
 }
 
-/// Thread-safe cache mapping `CacheKey` → pre-formatted response strings.
+/// Default maximum number of cached query computation results (5,000 entries).
+pub const DEFAULT_CACHE_CAPACITY: usize = 5_000;
+
+/// Default maximum memory allocation for cached payloads (1 GB).
+pub const DEFAULT_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+
+struct InnerCache {
+    lru: LruCache<CacheKey, CacheEntry>,
+    current_bytes: usize,
+    max_bytes: usize,
+}
+
+/// Thread-safe bounded LRU cache mapping [`CacheKey`] → pre-formatted response strings.
 ///
-/// Shared via `Arc` across all connection handlers; lookups use a read lock
-/// and are non-blocking as long as no insertion is in progress.
-#[derive(Default)]
+/// Shared via `Arc` across all connection handlers; lookups and insertions update
+/// recency order under a `Mutex`, evicting the least recently used entry when either
+/// max entry count or max byte size is exceeded.
 pub struct ComputeCache {
-    map: RwLock<HashMap<CacheKey, CacheEntry>>,
+    inner: Mutex<InnerCache>,
+}
+
+impl Default for ComputeCache {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 impl ComputeCache {
+    /// Create a new `ComputeCache` with item capacity and byte memory limit.
+    pub fn new(capacity: usize) -> Self {
+        Self::with_bounds(capacity, DEFAULT_CACHE_MAX_BYTES)
+    }
+
+    /// Create a new `ComputeCache` specifying both item count limit and byte capacity limit.
+    pub fn with_bounds(capacity: usize, max_bytes: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).expect("cache capacity must be non-zero");
+        Self {
+            inner: Mutex::new(InnerCache {
+                lru: LruCache::new(cap),
+                current_bytes: 0,
+                max_bytes,
+            }),
+        }
+    }
+
+    /// Initialize `ComputeCache` from environment variables `DLLB_CACHE_CAPACITY`
+    /// (default 5000) and `DLLB_CACHE_MAX_BYTES` (default 1GB, accepts bytes or '1G', '512M').
+    pub fn from_env() -> Self {
+        let capacity = std::env::var("DLLB_CACHE_CAPACITY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CACHE_CAPACITY);
+
+        let max_bytes = std::env::var("DLLB_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|s| parse_bytes_str(&s))
+            .unwrap_or(DEFAULT_CACHE_MAX_BYTES);
+
+        Self::with_bounds(capacity, max_bytes)
+    }
+
     /// Return the cached payload if it was computed at exactly
-    /// `current_version`. Returns `None` on a miss or stale entry.
+    /// `current_version`. Returns `None` on a miss or stale entry, updating
+    /// recency order on a hit.
     pub fn get(&self, key: &CacheKey, current_version: u64) -> Option<String> {
-        let guard = self.map.read().unwrap();
-        guard.get(key).and_then(|e| {
-            if e.version == current_version {
-                Some(e.payload.clone())
-            } else {
-                None
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(entry) = guard.lru.get(key) {
+            if entry.version == current_version {
+                return Some(entry.payload.clone());
             }
-        })
+        }
+        None
     }
 
     /// Store a computation result alongside the version it was computed at.
+    ///
+    /// Evicts LRU entries if capacity count or byte limit is exceeded.
     pub fn insert(&self, key: CacheKey, payload: String, version: u64) {
-        self.map
-            .write()
-            .unwrap()
-            .insert(key, CacheEntry { payload, version });
+        let entry_bytes = payload.len() + 128; // payload + key overhead estimate
+        let mut guard = self.inner.lock().unwrap();
+
+        // If key already exists, subtract old entry bytes before replacing.
+        if let Some(old) = guard.lru.pop(&key) {
+            guard.current_bytes = guard.current_bytes.saturating_sub(old.bytes);
+        }
+
+        // Evict LRU entries while max bytes or item capacity is exceeded.
+        while !guard.lru.is_empty()
+            && (guard.lru.len() >= guard.lru.cap().get()
+                || guard.current_bytes + entry_bytes > guard.max_bytes)
+        {
+            if let Some((_k, popped)) = guard.lru.pop_lru() {
+                guard.current_bytes = guard.current_bytes.saturating_sub(popped.bytes);
+            } else {
+                break;
+            }
+        }
+
+        guard.current_bytes += entry_bytes;
+        guard.lru.put(key, CacheEntry {
+            payload,
+            version,
+            bytes: entry_bytes,
+        });
+    }
+
+    /// Return the current number of cached entries.
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().lru.len()
+    }
+
+    /// Return whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().lru.is_empty()
+    }
+
+    /// Return total tracked byte consumption of cached entries.
+    pub fn current_bytes(&self) -> usize {
+        self.inner.lock().unwrap().current_bytes
+    }
+}
+
+/// Helper to parse human string like "1G", "512M", "100K", or raw numeric bytes.
+fn parse_bytes_str(s: &str) -> Option<usize> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(raw) = trimmed.parse::<usize>() {
+        return Some(raw);
+    }
+
+    let (num_part, unit) = trimmed.split_at(trimmed.len() - 1);
+    let num: usize = num_part.trim().parse().ok()?;
+    match unit.to_uppercase().as_str() {
+        "G" => Some(num * 1024 * 1024 * 1024),
+        "M" => Some(num * 1024 * 1024),
+        "K" => Some(num * 1024),
+        _ => None,
     }
 }
 
@@ -401,5 +517,70 @@ mod tests {
         c.insert(k.clone(), "v2".into(), 2);
         assert!(c.get(&k, 1).is_none()); // old version no longer valid
         assert_eq!(c.get(&k, 2), Some("v2".into()));
+    }
+
+    #[test]
+    fn lru_evicts_least_recently_used_entry() {
+        let c = ComputeCache::new(2);
+        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "degree".into(), limit: None }, OutcomeFormat::Json);
+        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "betweenness".into(), limit: None }, OutcomeFormat::Json);
+        let k3 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "closeness".into(), limit: None }, OutcomeFormat::Json);
+
+        c.insert(k1.clone(), "res1".into(), 1);
+        c.insert(k2.clone(), "res2".into(), 1);
+        assert_eq!(c.len(), 2);
+
+        // Inserting k3 exceeds capacity (2), so k1 (least recently used) should be evicted.
+        c.insert(k3.clone(), "res3".into(), 1);
+        assert_eq!(c.len(), 2);
+        assert!(c.get(&k1, 1).is_none());
+        assert_eq!(c.get(&k2, 1), Some("res2".into()));
+        assert_eq!(c.get(&k3, 1), Some("res3".into()));
+    }
+
+    #[test]
+    fn lru_get_refreshes_recency() {
+        let c = ComputeCache::new(2);
+        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m1".into(), limit: None }, OutcomeFormat::Json);
+        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m2".into(), limit: None }, OutcomeFormat::Json);
+        let k3 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m3".into(), limit: None }, OutcomeFormat::Json);
+
+        c.insert(k1.clone(), "res1".into(), 1);
+        c.insert(k2.clone(), "res2".into(), 1);
+
+        // Access k1 so k1 becomes MRU and k2 becomes LRU.
+        assert_eq!(c.get(&k1, 1), Some("res1".into()));
+
+        // Insert k3 -> should evict k2 now, leaving k1 and k3.
+        c.insert(k3.clone(), "res3".into(), 1);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.get(&k1, 1), Some("res1".into()));
+        assert!(c.get(&k2, 1).is_none());
+        assert_eq!(c.get(&k3, 1), Some("res3".into()));
+    }
+
+    #[test]
+    fn lru_evicts_when_byte_limit_exceeded() {
+        // Capacity 10 entries, but max 500 bytes. Each entry takes payload.len() + 128 bytes (~328 bytes).
+        let c = ComputeCache::with_bounds(10, 500);
+        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m1".into(), limit: None }, OutcomeFormat::Json);
+        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m2".into(), limit: None }, OutcomeFormat::Json);
+
+        c.insert(k1.clone(), "x".repeat(200), 1);
+        assert_eq!(c.len(), 1);
+
+        // Inserting k2 (another ~328 bytes) pushes current_bytes over 500 bytes -> k1 is evicted.
+        c.insert(k2.clone(), "y".repeat(200), 1);
+        assert_eq!(c.len(), 1);
+        assert!(c.get(&k1, 1).is_none());
+        assert!(c.get(&k2, 1).is_some());
+    }
+
+    #[test]
+    fn test_parse_bytes_str() {
+        assert_eq!(parse_bytes_str("1G"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_bytes_str("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_bytes_str("100K"), Some(100 * 1024));
+        assert_eq!(parse_bytes_str("1048576"), Some(1048576));
     }
 }

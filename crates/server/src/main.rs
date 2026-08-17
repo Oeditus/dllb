@@ -13,6 +13,9 @@ use dllb_query::{
 };
 use dllb_storage::db::DllbStorage;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
