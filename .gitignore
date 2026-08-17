@@ -18,6 +18,7 @@
 *.redb.search/
 *.wal
 *.db
+/dllb_dev.redb.search/
 
 # Tantivy index directories
 .tantivy/
