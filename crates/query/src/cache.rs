@@ -278,10 +278,10 @@ impl ComputeCache {
     /// recency order on a hit.
     pub fn get(&self, key: &CacheKey, current_version: u64) -> Option<String> {
         let mut guard = self.inner.lock().unwrap();
-        if let Some(entry) = guard.lru.get(key) {
-            if entry.version == current_version {
-                return Some(entry.payload.clone());
-            }
+        if let Some(entry) = guard.lru.get(key)
+            && entry.version == current_version
+        {
+            return Some(entry.payload.clone());
         }
         None
     }
@@ -311,11 +311,14 @@ impl ComputeCache {
         }
 
         guard.current_bytes += entry_bytes;
-        guard.lru.put(key, CacheEntry {
-            payload,
-            version,
-            bytes: entry_bytes,
-        });
+        guard.lru.put(
+            key,
+            CacheEntry {
+                payload,
+                version,
+                bytes: entry_bytes,
+            },
+        );
     }
 
     /// Return the current number of cached entries.
@@ -522,9 +525,36 @@ mod tests {
     #[test]
     fn lru_evicts_least_recently_used_entry() {
         let c = ComputeCache::new(2);
-        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "degree".into(), limit: None }, OutcomeFormat::Json);
-        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "betweenness".into(), limit: None }, OutcomeFormat::Json);
-        let k3 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "closeness".into(), limit: None }, OutcomeFormat::Json);
+        let k1 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "degree".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
+        let k2 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "betweenness".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
+        let k3 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "closeness".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
 
         c.insert(k1.clone(), "res1".into(), 1);
         c.insert(k2.clone(), "res2".into(), 1);
@@ -541,9 +571,36 @@ mod tests {
     #[test]
     fn lru_get_refreshes_recency() {
         let c = ComputeCache::new(2);
-        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m1".into(), limit: None }, OutcomeFormat::Json);
-        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m2".into(), limit: None }, OutcomeFormat::Json);
-        let k3 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m3".into(), limit: None }, OutcomeFormat::Json);
+        let k1 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "m1".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
+        let k2 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "m2".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
+        let k3 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "m3".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
 
         c.insert(k1.clone(), "res1".into(), 1);
         c.insert(k2.clone(), "res2".into(), 1);
@@ -563,8 +620,26 @@ mod tests {
     fn lru_evicts_when_byte_limit_exceeded() {
         // Capacity 10 entries, but max 500 bytes. Each entry takes payload.len() + 128 bytes (~328 bytes).
         let c = ComputeCache::with_bounds(10, 500);
-        let k1 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m1".into(), limit: None }, OutcomeFormat::Json);
-        let k2 = CacheKey::new("ns", "db", "t", CacheKind::Centrality { mode: "m2".into(), limit: None }, OutcomeFormat::Json);
+        let k1 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "m1".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
+        let k2 = CacheKey::new(
+            "ns",
+            "db",
+            "t",
+            CacheKind::Centrality {
+                mode: "m2".into(),
+                limit: None,
+            },
+            OutcomeFormat::Json,
+        );
 
         c.insert(k1.clone(), "x".repeat(200), 1);
         assert_eq!(c.len(), 1);
