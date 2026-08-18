@@ -19,7 +19,7 @@
 ---
 
 > [!IMPORTANT]
-> **Pre-release Note (v1.0.0-rc.2)**: This is a Release Candidate for `dllb` 1.0.0. The prototype core is complete, implementing stable APIs for documents, graphs, Tantivy-powered search, and HNSW vector indexing.
+> **Pre-release Note (v1.0.0-rc.3)**: This is a Release Candidate for `dllb` 1.0.0. The prototype core is complete, implementing stable APIs for documents, graphs, Tantivy-powered search, and HNSW vector indexing.
 
 ### Modern Features (v1.0.0-rc.2)
 - **Zero-Copy & Zero-Dependency Engine**: Built on pure Rust `redb` for ACID transactions and thread-safe MVCC reads without dynamic C links.
