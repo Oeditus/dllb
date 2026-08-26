@@ -27,16 +27,14 @@ pub fn distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 /// Returns 0.0 for identical directions, 1.0 for orthogonal, 2.0 for opposite.
 /// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    let chunks_a = a.chunks_exact(8);
-    let chunks_b = b.chunks_exact(8);
-    let remainder_a = chunks_a.remainder();
-    let remainder_b = chunks_b.remainder();
+    let (chunks_a, remainder_a) = a.as_chunks::<8>();
+    let (chunks_b, remainder_b) = b.as_chunks::<8>();
 
     let mut dot_acc = [0.0f32; 8];
     let mut norm_a_acc = [0.0f32; 8];
     let mut norm_b_acc = [0.0f32; 8];
 
-    for (ca, cb) in chunks_a.zip(chunks_b) {
+    for (ca, cb) in chunks_a.iter().zip(chunks_b) {
         for i in 0..8 {
             dot_acc[i] += ca[i] * cb[i];
             norm_a_acc[i] += ca[i] * ca[i];
@@ -64,13 +62,11 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Euclidean (L2) distance.
 /// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    let chunks_a = a.chunks_exact(8);
-    let chunks_b = b.chunks_exact(8);
-    let remainder_a = chunks_a.remainder();
-    let remainder_b = chunks_b.remainder();
+    let (chunks_a, remainder_a) = a.as_chunks::<8>();
+    let (chunks_b, remainder_b) = b.as_chunks::<8>();
 
     let mut sum = [0.0f32; 8];
-    for (ca, cb) in chunks_a.zip(chunks_b) {
+    for (ca, cb) in chunks_a.iter().zip(chunks_b) {
         for i in 0..8 {
             let d = ca[i] - cb[i];
             sum[i] += d * d;
@@ -88,13 +84,11 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Dot product of two vectors.
 /// Uses chunked accumulation (8-wide) to enable compiler auto-vectorization.
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    let chunks_a = a.chunks_exact(8);
-    let chunks_b = b.chunks_exact(8);
-    let remainder_a = chunks_a.remainder();
-    let remainder_b = chunks_b.remainder();
+    let (chunks_a, remainder_a) = a.as_chunks::<8>();
+    let (chunks_b, remainder_b) = b.as_chunks::<8>();
 
     let mut sum = [0.0f32; 8];
-    for (ca, cb) in chunks_a.zip(chunks_b) {
+    for (ca, cb) in chunks_a.iter().zip(chunks_b) {
         for i in 0..8 {
             sum[i] += ca[i] * cb[i];
         }
