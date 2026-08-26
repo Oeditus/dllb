@@ -1,0 +1,33 @@
+# dllb Database Server Configuration Example
+# Place at /etc/dllb/dllb.toml or specify via environment variables
+
+[server]
+# Address and port to bind the database listener
+bind = "0.0.0.0:3009"
+
+# Default namespace and database
+default_namespace = "default"
+default_database = "default"
+
+# Logging level: error, warn, info, debug, trace
+log_level = "info"
+
+[storage]
+# Path to the redb database storage file
+path = "/var/lib/dllb/dllb.redb"
+
+# Cache memory size limit (in megabytes)
+cache_capacity_mb = 512
+
+[search]
+# Storage path for Tantivy full-text index files
+fts_path = "/var/lib/dllb/search"
+
+# Memory budget for index writing (in megabytes)
+writer_memory_budget_mb = 128
+
+[vector]
+# Default HNSW vector index construction parameters
+max_m = 16
+ef_construction = 200
+default_ef_search = 50

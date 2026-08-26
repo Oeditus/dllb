@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  dllb-server:
+    image: ghcr.io/oeditus/dllb:1.0.0
+    container_name: dllb-server
+    restart: unless-stopped
+    ports:
+      - "3009:3009"
+    environment:
+      - DLLB_BIND=0.0.0.0:3009
+      - DLLB_PATH=/var/lib/dllb/dllb.redb
+      - DLLB_NS=default
+      - DLLB_DB=default
+      - RUST_LOG=info
+    volumes:
+      - dllb-data:/var/lib/dllb
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3009 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  dllb-data:
+    driver: local

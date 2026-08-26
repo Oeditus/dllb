@@ -19,9 +19,9 @@
 ---
 
 > [!IMPORTANT]
-> **Pre-release Note (v1.0.0-rc.3)**: This is a Release Candidate for `dllb` 1.0.0. The prototype core is complete, implementing stable APIs for documents, graphs, Tantivy-powered search, and HNSW vector indexing.
+> **Release Note (v1.0.0 GA)**: `dllb` 1.0.0 is officially released! The core engine implements stable APIs for documents, graphs, Tantivy-powered full-text search, HNSW vector indexing, and code intelligence.
 
-### Modern Features (v1.0.0-rc.2)
+### Modern Features (v1.0.0)
 - **Zero-Copy & Zero-Dependency Engine**: Built on pure Rust `redb` for ACID transactions and thread-safe MVCC reads without dynamic C links.
 - **Unified Key Encoding**: Maps document, graph, index, and metadata entries into a single sorted keyspace; scans use highly efficient binary prefix range checks.
 - **Supervised Actor Architecture**: Powered by `joerl` (Erlang/OTP patterns in Rust), ensuring stateful subsystems (storage, indexing) recover automatically from failures.
@@ -199,28 +199,47 @@ dllb/
 | Serialization | MessagePack + JSON | Compact internal, readable external |
 | Vector math | SIMD (planned) | Hardware-accelerated distance computation |
 
-## Getting Started
+### Fast Installation
 
-### Prerequisites
+#### Option 1: Universal Shell Installer (Linux & macOS)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Oeditus/dllb/main/install.sh | sh
+```
+
+#### Option 2: Docker
+```bash
+docker run -d --name dllb-server -p 3009:3009 ghcr.io/oeditus/dllb:1.0.0
+```
+
+#### Option 3: Docker Compose
+```bash
+git clone https://github.com/Oeditus/dllb.git
+cd dllb/deploy
+docker compose up -d
+```
+
+### Build from Source
+
+#### Prerequisites
 
 - Rust 1.89+ (edition 2024)
 - Linux, macOS, or Windows
 
-### Build
+#### Build
 
 ```bash
-git clone <repo-url> dllb
+git clone https://github.com/Oeditus/dllb.git
 cd dllb
 cargo build --release
 ```
 
-### Run the Server
+#### Run the Server
 
 ```bash
 cargo run --release -p dllb-server
 ```
 
-### Run the CLI
+#### Run the CLI
 
 ```bash
 cargo run --release -p dllb-cli

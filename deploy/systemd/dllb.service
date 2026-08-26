@@ -1,0 +1,31 @@
+[Unit]
+Description=dllb Multi-Model NoSQL Database Server
+Documentation=https://github.com/Oeditus/dllb
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=dllb
+Group=dllb
+ExecStart=/usr/local/bin/dllb-server
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+Environment="DLLB_BIND=0.0.0.0:3009"
+Environment="DLLB_PATH=/var/lib/dllb/dllb.redb"
+Environment="DLLB_NS=default"
+Environment="DLLB_DB=default"
+Environment="RUST_LOG=info"
+
+# Security Sandboxing Options
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dllb
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=multi-user.target
