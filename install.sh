@@ -25,6 +25,11 @@ detect_arch() {
 detect_os
 detect_arch
 
+if [ "$OS" = "apple-darwin" ] && [ "$ARCH" = "x86_64" ]; then
+    echo "Unsupported architecture: x86_64-apple-darwin binaries are not provided in releases."
+    exit 1
+fi
+
 TARGET="${ARCH}-${OS}"
 TAG=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
