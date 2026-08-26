@@ -43,6 +43,3 @@ dllb.log
 # Elixir
 .erl.history/
 
-# Docker
-.dockerignore
-Dockerfile

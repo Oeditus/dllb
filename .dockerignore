@@ -1,0 +1,8 @@
+target/*
+!target/release
+target/release/*
+!target/release/dllb-server
+!target/release/dllb-cli
+.git/
+dllb_dev.redb*
+*.log
