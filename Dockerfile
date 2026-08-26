@@ -1,18 +1,20 @@
 # Multi-stage Dockerfile for dllb DBMS
 
 # --- Build Stage ---
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /usr/src/dllb
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    build-essential \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-RUN cargo build --release -p dllb-server -p dllb-cli
+RUN cargo build --release --workspace
 
 # --- Runtime Stage ---
 FROM debian:bookworm-slim AS runtime
