@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/dist/
 **/*.rs.bk
 
 # Cargo lock for libraries (keep for binaries -- this workspace has both)
