@@ -25,7 +25,20 @@ pub struct RedbBackend {
 impl RedbBackend {
     /// Open or create a database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let db = Database::create(path.as_ref()).map_err(map_err)?;
+        let path_ref = path.as_ref();
+        let db = Database::create(path_ref).map_err(|e| {
+            let canonical = path_ref.canonicalize().unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path_ref))
+                    .unwrap_or_else(|_| path_ref.to_path_buf())
+            });
+            Error::Storage(format!(
+                "Failed to acquire lock or open database file '{}' (canonical path: '{}'): {}",
+                path_ref.display(),
+                canonical.display(),
+                e
+            ))
+        })?;
 
         // Ensure the data table exists by opening a write transaction.
         let txn = db.begin_write().map_err(map_err)?;

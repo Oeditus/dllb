@@ -5,6 +5,12 @@ All notable changes to `dllb` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-08-30
+
+### Fixed
+- `dllb-server` now derives the Unix domain socket file name from the bound TCP port (`dllb_<port>.sock` by default, or the `DLLB_SOCK` value suffixed with the port), preventing socket path collisions when multiple server instances are spawned simultaneously on different ports.
+- Database-open failures (e.g. `Database already open. Cannot acquire lock.`) now print a detailed diagnostic block before panicking: the resolved lock path, database file existence/size/modification time, the associated search-index directory, and troubleshooting steps (`lsof`/`fuser`, using a unique `DLLB_PATH` per instance).
+
 ## [1.0.0] - 2026-08-26
 
 ### Added
