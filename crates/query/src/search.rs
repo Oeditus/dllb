@@ -58,20 +58,25 @@ impl SearchServices {
 
     // -- Full-text ----------------------------------------------------------
 
-    /// Ensure a full-text index for `table.field` is open (creating or
-    /// reopening its on-disk Tantivy directory). Idempotent within a process.
+    /// Ensure a full-text index is open, preserving the existing public API.
     pub fn ensure_fulltext(&self, table: &str, field: &str, analyzer: &str) -> Result<()> {
+        self.open_fulltext(table, field, analyzer).map(|_| ())
+    }
+
+    /// Open a full-text index, returning true only when its on-disk files
+    /// were missing and the caller needs to backfill existing text.
+    pub fn open_fulltext(&self, table: &str, field: &str, analyzer: &str) -> Result<bool> {
         let key = fts_key(table, field);
-        if self.fts_open.read().map_err(lock_err)?.contains(&key) {
-            return Ok(());
+        let mut open = self.fts_open.write().map_err(lock_err)?;
+        if open.contains(&key) {
+            return Ok(false);
         }
         let cfg = parse_analyzer(analyzer)?;
-        self.fts
-            .write()
-            .map_err(lock_err)?
-            .define_index(table, field, cfg)?;
-        self.fts_open.write().map_err(lock_err)?.insert(key);
-        Ok(())
+        let mut fts = self.fts.write().map_err(lock_err)?;
+        let newly_created = !fts.index_exists(table, field);
+        fts.define_index(table, field, cfg)?;
+        open.insert(key);
+        Ok(newly_created)
     }
 
     /// Index (or re-index) a document's text in the full-text index.
@@ -98,11 +103,12 @@ impl SearchServices {
     /// Drop a full-text index, closing it and removing its on-disk directory.
     pub fn drop_fulltext(&self, table: &str, field: &str) -> Result<()> {
         let key = fts_key(table, field);
+        let mut open = self.fts_open.write().map_err(lock_err)?;
         self.fts
             .write()
             .map_err(lock_err)?
             .drop_index(table, field)?;
-        self.fts_open.write().map_err(lock_err)?.remove(&key);
+        open.remove(&key);
         Ok(())
     }
 

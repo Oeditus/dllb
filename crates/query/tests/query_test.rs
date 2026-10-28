@@ -2205,6 +2205,143 @@ fn hybrid_search_errors_without_services() {
 }
 
 #[test]
+fn repeated_index_definitions_preserve_search_state() {
+    let (dir, storage) = temp_storage();
+    let search = Arc::new(SearchServices::new(dir.path().join("search")));
+    let e = QueryExecutor::new_with_services(
+        &storage,
+        "ns",
+        "db",
+        Arc::new(ComputeCache::default()),
+        Arc::new(WriteVersions::default()),
+        Arc::clone(&search),
+    );
+    e.run("CREATE doc:a SET body = 'alpha', emb = [1.0, 0.0];")
+        .unwrap();
+    let definitions = [
+        "DEFINE INDEX by_body ON doc FIELDS body;",
+        "DEFINE FULLTEXT INDEX ft ON doc FIELDS body;",
+        "DEFINE VECTOR INDEX vec ON doc FIELDS emb DIMENSION 2;",
+    ];
+    for ddl in definitions {
+        e.run(ddl).unwrap();
+    }
+    let before = search
+        .get_or_create_vector("vec", 2, dllb_vector::DistanceMetric::Cosine)
+        .unwrap();
+
+    // Change only the search service: a redundant backfill would undo this.
+    search.fts_delete("doc", "body", "a").unwrap();
+    search.fts_commit().unwrap();
+    for ddl in definitions {
+        e.run(ddl).unwrap();
+    }
+    let after = search
+        .get_or_create_vector("vec", 2, dllb_vector::DistanceMetric::Cosine)
+        .unwrap();
+    assert!(Arc::ptr_eq(&before.index, &after.index));
+    assert!(rows_of(e.run("SEARCH doc body 'alpha'").unwrap().0).is_empty());
+
+    // Incremental writes must still update all three indexes.
+    e.run("UPDATE doc:a SET body = 'beta', emb = [0.0, 1.0];")
+        .unwrap();
+    assert!(matches!(
+        rows_of(e.run("SELECT * FROM doc WHERE body = 'beta'").unwrap().0).as_slice(),
+        [_]
+    ));
+    assert!(matches!(
+        rows_of(e.run("SEARCH doc body 'beta'").unwrap().0).as_slice(),
+        [_]
+    ));
+    assert!(matches!(
+        rows_of(e.run("VECTOR SEARCH doc emb [0.0, 1.0] K 1").unwrap().0).as_slice(),
+        [_]
+    ));
+}
+
+#[test]
+fn repeated_index_definitions_reopen_after_restart_and_recover_missing_fulltext() {
+    let (dir, storage) = temp_storage();
+    let search_path = dir.path().join("search");
+    let definitions = [
+        "DEFINE INDEX by_body ON doc FIELDS body;",
+        "DEFINE FULLTEXT INDEX ft ON doc FIELDS body;",
+        "DEFINE VECTOR INDEX vec ON doc FIELDS emb DIMENSION 2;",
+    ];
+    {
+        let e = exec_with_search(&storage, &dir);
+        e.run("CREATE doc:a SET body = 'alpha', emb = [1.0, 0.0];")
+            .unwrap();
+        for ddl in definitions {
+            e.run(ddl).unwrap();
+        }
+    }
+
+    for missing_fulltext in [false, true] {
+        if missing_fulltext {
+            std::fs::remove_dir_all(search_path.join("fts")).unwrap();
+        }
+        let search = Arc::new(SearchServices::new(&search_path));
+        let e = QueryExecutor::new_with_services(
+            &storage,
+            "ns",
+            "db",
+            Arc::new(ComputeCache::default()),
+            Arc::new(WriteVersions::default()),
+            Arc::clone(&search),
+        );
+        for ddl in definitions {
+            e.run(ddl).unwrap();
+        }
+        let vector = search
+            .get_or_create_vector("vec", 2, dllb_vector::DistanceMetric::Cosine)
+            .unwrap();
+        // DDL must not eagerly restore the entire vector index on restart.
+        assert!(!vector.loaded.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            rows_of(e.run("SEARCH doc body 'alpha'").unwrap().0).as_slice(),
+            [_]
+        ));
+        assert!(matches!(
+            rows_of(e.run("VECTOR SEARCH doc emb [1.0, 0.0] K 1").unwrap().0).as_slice(),
+            [_]
+        ));
+        assert!(vector.loaded.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn conflicting_index_definitions_require_explicit_removal() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+    for (original, conflict) in [
+        (
+            "DEFINE INDEX idx ON doc FIELDS body;",
+            "DEFINE INDEX idx ON doc FIELDS other;",
+        ),
+        (
+            "DEFINE FULLTEXT INDEX idx ON doc FIELDS body;",
+            "DEFINE FULLTEXT INDEX idx ON doc FIELDS other;",
+        ),
+        (
+            "DEFINE VECTOR INDEX idx ON doc FIELDS emb DIMENSION 2;",
+            "DEFINE VECTOR INDEX idx ON doc FIELDS emb DIMENSION 3;",
+        ),
+        (
+            "DEFINE INDEX idx ON doc FIELDS body;",
+            "DEFINE FULLTEXT INDEX idx ON doc FIELDS body;",
+        ),
+    ] {
+        e.run(original).unwrap();
+        let error = e.run(conflict).unwrap_err().to_string();
+        assert!(error.contains("REMOVE INDEX"), "{error}");
+        e.run("REMOVE INDEX idx ON doc;").unwrap();
+        e.run(conflict).unwrap();
+        e.run("REMOVE INDEX idx ON doc;").unwrap();
+    }
+}
+
+#[test]
 fn test_concurrent_vector_index_lazy_rebuild() {
     let (_dir, storage) = temp_storage();
     let search_dir = tempfile::tempdir().unwrap();

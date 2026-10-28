@@ -1225,6 +1225,21 @@ impl<'s> QueryExecutor<'s> {
     // -------------------------------------------------------------------
     // Index DDL
     // -------------------------------------------------------------------
+    /// Identical DDL is a no-op. Changing a definition requires an explicit
+    /// REMOVE INDEX so old entries and external search structures are removed.
+    fn index_already_defined(&self, def: &IndexDefinition, table: &str) -> Result<bool> {
+        let existing = index::load_index_definitions(self.storage, &self.ns, &self.db, table)?
+            .into_iter()
+            .find(|existing| existing.name == def.name);
+        match existing {
+            Some(existing) if existing == *def => Ok(true),
+            Some(_) => Err(dllb_core::Error::Schema(format!(
+                "index '{}' on '{table}' has a different definition; REMOVE INDEX before redefining it",
+                def.name
+            ))),
+            None => Ok(false),
+        }
+    }
 
     /// `DEFINE INDEX`: register an index in the catalog and backfill entries
     /// for all existing documents, atomically. For a unique index, the
@@ -1243,6 +1258,9 @@ impl<'s> QueryExecutor<'s> {
             ));
         }
         let def = IndexDefinition::btree(name, fields.to_vec(), unique);
+        if self.index_already_defined(&def, table)? {
+            return Ok(QueryResult::Ok);
+        }
 
         // Scan existing documents to backfill entries (and validate uniqueness
         // up front so a failed constraint persists nothing). Uniqueness is over
@@ -1353,12 +1371,14 @@ impl<'s> QueryExecutor<'s> {
                 analyzer: analyzer.clone(),
             },
         };
-        let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
-        self.storage
-            .write_batch(&[(def_key.as_slice(), def_bytes.as_slice())], &[])?;
+        let already_defined = self.index_already_defined(&def, table)?;
+        let newly_created = services.open_fulltext(table, field, &analyzer)?;
+        if already_defined && !newly_created {
+            return Ok(QueryResult::Ok);
+        }
 
-        // Open the index and backfill text from existing documents.
-        services.ensure_fulltext(table, field, &analyzer)?;
+        // A missing on-disk search index still needs recovery even when its
+        // catalog definition survived. Existing persisted indexes are reused.
         let coll = Collection::new(self.storage, &self.ns, &self.db, table);
         for doc in coll.scan_all()? {
             if let Some(text) = doc.fields.get(field).and_then(search::value_to_text) {
@@ -1366,6 +1386,9 @@ impl<'s> QueryExecutor<'s> {
             }
         }
         services.fts_commit()?;
+        let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
+        self.storage
+            .write_batch(&[(def_key.as_slice(), def_bytes.as_slice())], &[])?;
 
         Ok(QueryResult::Ok)
     }
@@ -1399,6 +1422,12 @@ impl<'s> QueryExecutor<'s> {
                 metric: metric.clone(),
             },
         };
+        if self.index_already_defined(&def, table)? {
+            // Preserve a loaded HNSW graph. After restart, register an empty
+            // entry and let the first vector search/write restore it once.
+            services.get_or_create_vector(name, dim, parsed_metric)?;
+            return Ok(QueryResult::Ok);
+        }
         let (def_key, def_bytes) = index::index_definition_kv(&self.ns, &self.db, table, &def)?;
         self.storage
             .write_batch(&[(def_key.as_slice(), def_bytes.as_slice())], &[])?;

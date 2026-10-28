@@ -26,6 +26,15 @@ impl FtsManager {
         }
     }
 
+    /// Whether a persisted full-text index is available for reopening.
+    pub fn index_exists(&self, table: &str, field: &str) -> bool {
+        self.base_dir
+            .join("fts")
+            .join(index_key(table, field))
+            .join("meta.json")
+            .is_file()
+    }
+
     /// Define and open a full-text index for a table/field combination.
     pub fn define_index(
         &mut self,
