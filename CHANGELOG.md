@@ -5,6 +5,16 @@ All notable changes to `dllb` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-18
+
+### Changed
+- Updated all direct Rust dependencies to their latest stable releases and refreshed compatible transitive dependencies.
+- Upgraded the actor runtime to `joerl` 0.8.0, full-text search to Tantivy 0.27.0, and vector random-number generation to `rand` 0.10.4.
+- Upgraded the CLI to `rustyline` 19.0.0 and `marcli` 0.2.0, the query cache to `lru` 0.19.0, and the allocator to `tikv-jemallocator` 0.7.0.
+- Updated Criterion to 0.8.2 and migrated all benchmarks to `std::hint::black_box`.
+- Refreshed serialization, storage, async runtime, tracing, UUID, and test dependencies.
+- Updated installation and container deployment examples for version 1.1.0.
+
 ## [1.0.2] - 2026-10-28
 
 ### Fixed

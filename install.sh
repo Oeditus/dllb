@@ -34,7 +34,7 @@ TARGET="${ARCH}-${OS}"
 TAG=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$TAG" ]; then
-    TAG="v1.0.0"
+    TAG="v1.1.0"
 fi
 
 ARCHIVE="dllb-${TAG}-${TARGET}.tar.gz"
