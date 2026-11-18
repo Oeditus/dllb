@@ -5,7 +5,9 @@
 //! - Single-hop outgoing traversal on a star graph (fan-out 10 and 100)
 //! - 2-hop typed walk on a linear chain of 100 nodes
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dllb_graph::{Direction, Edge, EdgeStore, HopSpec, Traversal};
 use dllb_storage::db::DllbStorage;
 

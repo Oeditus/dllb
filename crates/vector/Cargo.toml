@@ -7,11 +7,11 @@ description = "HNSW vector index, distance metrics, VECTOR type, quantization"
 
 [dependencies]
 dllb-core = { workspace = true }
-rand = "0.9"
+rand = "0.10.4"
 tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 criterion = { workspace = true }
 
 [[bench]]

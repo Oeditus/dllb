@@ -4,7 +4,9 @@
 //! - Sequential document creation (100 and 1K documents per batch)
 //! - Full-table scan (`scan_all`) over a pre-populated collection (100 / 1K docs)
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dllb_core::{RecordId, Value};
 use dllb_document::{Collection, Document, IndexDefinition};
 use dllb_storage::db::DllbStorage;

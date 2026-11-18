@@ -6,7 +6,9 @@
 //! - Single `get` (read transaction overhead + B-tree lookup)
 //! - `prefix_scan` over 100 and 1K matching entries
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dllb_storage::db::DllbStorage;
 
 // ---------------------------------------------------------------------------

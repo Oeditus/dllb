@@ -3,7 +3,7 @@
 use dllb_vector::{BruteForceIndex, DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
 
 fn random_vectors(n: usize, dim: usize) -> Vec<(String, Vec<f32>)> {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     (0..n)
         .map(|i| {

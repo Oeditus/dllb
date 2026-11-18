@@ -5,7 +5,9 @@
 //! - BM25 query latency: top-10 results across three distinct query strings
 //!   against a pre-built index of 1K documents
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dllb_search::{AnalyzerConfig, FtsIndex};
 
 // ---------------------------------------------------------------------------

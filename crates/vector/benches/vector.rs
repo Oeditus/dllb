@@ -6,9 +6,10 @@
 //! - HNSW KNN-10 query latency on a pre-built index of 1K / 10K vectors
 //! - Brute-force exact KNN-10 baseline on 1K vectors
 
+use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dllb_vector::{
     BruteForceIndex, DistanceMetric, HnswConfig, HnswIndex, VectorIndex,
     distance::{cosine_distance, dot_product, euclidean_distance},

@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, HashSet};
 use std::io::Cursor;
 use std::io::Read as _;
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::distance::{DistanceMetric, distance};
 use crate::{VectorHit, VectorIndex};
