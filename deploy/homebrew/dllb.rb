@@ -1,8 +1,8 @@
 class Dllb < Formula
   desc "Multi-model NoSQL DBMS in Rust (Documents, Graphs, Search, Vectors)"
   homepage "https://github.com/Oeditus/dllb"
-  url "https://github.com/Oeditus/dllb/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000" # Update on release
+  url "https://github.com/Oeditus/dllb/archive/refs/tags/v1.1.0.tar.gz"
+  sha256 "dfe5a8dbf7e8254e6cee3a811f6cd8afb5ed80c72c718efa6e2d1c86ca3f7eba"
   license "MIT"
   head "https://github.com/Oeditus/dllb.git", branch: "main"
 
@@ -14,6 +14,6 @@ class Dllb < Formula
   end
 
   test do
-    assert_match "dllb", shell_output("#{bin}/dllb-cli --version")
+    assert_match "dllb v#{version}", pipe_output("#{bin}/dllb-cli --no-color --path #{testpath}/test.redb", ".quit\n", 0)
   end
 end
