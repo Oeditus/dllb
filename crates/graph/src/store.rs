@@ -228,47 +228,11 @@ impl<'s> EdgeStore<'s> {
     /// `"weight"` edge property (float or int); defaults to `1.0` when
     /// absent. Incoming reverse-pointer entries are skipped automatically.
     pub fn scan_all_outgoing(&self) -> dllb_core::Result<Vec<(String, String, f64)>> {
-        use dllb_storage::key::{self, tag};
-        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
-        let entries = self.storage.prefix_scan(&prefix)?;
-        let mut edges = Vec::with_capacity(entries.len() / 2);
-
-        for (k, v) in entries {
-            let parts = key::parse_key(&k)?;
-            // remainder = src\0<dir>edge_type\0dst
-            let segs: Vec<&[u8]> = parts
-                .remainder
-                .splitn(3, |&b| b == key::SEPARATOR)
-                .collect();
-            if segs.len() < 3 {
-                continue;
-            }
-            let dir_type = segs[1];
-            if dir_type.is_empty() || dir_type[0] != key::dir::OUTGOING {
-                continue; // skip incoming reverse pointers
-            }
-            let src = match std::str::from_utf8(segs[0]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            let dst = match std::str::from_utf8(segs[2]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            let weight = if v.is_empty() {
-                1.0
-            } else {
-                let props: BTreeMap<String, dllb_core::Value> =
-                    rmp_serde::from_slice(&v).unwrap_or_default();
-                match props.get("weight") {
-                    Some(dllb_core::Value::Float(f)) => *f,
-                    Some(dllb_core::Value::Int(n)) => *n as f64,
-                    _ => 1.0,
-                }
-            };
-            edges.push((src, dst, weight));
-        }
-        Ok(edges)
+        Ok(self
+            .scan_edges(ScanMode::WithProperties)?
+            .into_iter()
+            .map(|edge| (edge.src, edge.dst, edge_weight(&edge.properties)))
+            .collect())
     }
 
     /// Scan all outgoing edges as `(src, dst)` pairs, ignoring properties.
@@ -279,36 +243,11 @@ impl<'s> EdgeStore<'s> {
     /// otherwise pay to deserialize every edge's properties just to discard
     /// them. Incoming reverse-pointer entries are skipped automatically.
     pub fn scan_all_edges(&self) -> dllb_core::Result<Vec<(String, String)>> {
-        use dllb_storage::key::{self, tag};
-        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
-        let keys = self.storage.scan_prefix_keys(&prefix)?;
-        let mut edges = Vec::with_capacity(keys.len() / 2);
-
-        for k in keys {
-            let parts = key::parse_key(&k)?;
-            // remainder = src\0<dir>edge_type\0dst
-            let segs: Vec<&[u8]> = parts
-                .remainder
-                .splitn(3, |&b| b == key::SEPARATOR)
-                .collect();
-            if segs.len() < 3 {
-                continue;
-            }
-            let dir_type = segs[1];
-            if dir_type.is_empty() || dir_type[0] != key::dir::OUTGOING {
-                continue; // skip incoming reverse pointers
-            }
-            let src = match std::str::from_utf8(segs[0]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            let dst = match std::str::from_utf8(segs[2]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            edges.push((src, dst));
-        }
-        Ok(edges)
+        Ok(self
+            .scan_edges(ScanMode::KeysOnly)?
+            .into_iter()
+            .map(|edge| (edge.src, edge.dst))
+            .collect())
     }
 
     /// Scan all outgoing edges in this edge table as full [`Edge`] values.
@@ -317,43 +256,63 @@ impl<'s> EdgeStore<'s> {
     /// the edge type and deserializes properties. Incoming reverse-pointer
     /// entries are skipped automatically.
     pub fn scan_all_outgoing_edges(&self) -> Result<Vec<Edge>> {
-        use dllb_storage::key::{self, tag};
-        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
-        let entries = self.storage.prefix_scan(&prefix)?;
-        let mut edges = Vec::with_capacity(entries.len() / 2);
+        self.scan_edges(ScanMode::WithProperties)
+    }
 
+    /// The single edge-scan implementation shared by the three public
+    /// scanners above.
+    ///
+    /// Edge keys are `ns\0db\0table\0~src\0<dir><edge_type>\0dst`. The
+    /// direction byte separates outgoing from incoming entries within a
+    /// vertex's region, so a whole-table scan must filter on it: the incoming
+    /// reverse pointers are duplicates of the outgoing edges, not extra ones.
+    fn scan_edges(&self, mode: ScanMode) -> Result<Vec<Edge>> {
+        use dllb_storage::key::tag;
+
+        let prefix = key::table_prefix(&self.ns, &self.db, &self.table, tag::GRAPH_EDGE);
+
+        // Keys-only callers never touch values, which is the whole point of
+        // the mode: connectivity and traversal ignore edge properties.
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = match mode {
+            ScanMode::KeysOnly => self
+                .storage
+                .scan_prefix_keys(&prefix)?
+                .into_iter()
+                .map(|k| (k, Vec::new()))
+                .collect(),
+            ScanMode::WithProperties => self.storage.prefix_scan(&prefix)?,
+        };
+
+        let mut edges = Vec::with_capacity(entries.len() / 2);
         for (k, v) in entries {
             let parts = key::parse_key(&k)?;
-            // remainder = src\0<dir>edge_type\0dst
+            // remainder = src\0<dir><edge_type>\0dst
             let segs: Vec<&[u8]> = parts
                 .remainder
                 .splitn(3, |&b| b == key::SEPARATOR)
                 .collect();
-            if segs.len() < 3 {
+            let [src, dir_type, dst] = segs.as_slice() else {
+                continue;
+            };
+            // Skip incoming reverse pointers (and malformed empty segments).
+            if dir_type.first() != Some(&key::dir::OUTGOING) {
                 continue;
             }
-            let dir_type = segs[1];
-            if dir_type.is_empty() || dir_type[0] != key::dir::OUTGOING {
-                continue; // skip incoming reverse pointers
-            }
-            let src = match std::str::from_utf8(segs[0]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
+            let (Ok(src), Ok(edge_type), Ok(dst)) = (
+                std::str::from_utf8(src),
+                std::str::from_utf8(&dir_type[1..]),
+                std::str::from_utf8(dst),
+            ) else {
+                continue;
             };
-            // dir_type = <dir byte><edge_type bytes>
-            let edge_type = match std::str::from_utf8(&dir_type[1..]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
+            let properties = match mode {
+                ScanMode::KeysOnly => BTreeMap::new(),
+                ScanMode::WithProperties => deserialize_props(&v)?,
             };
-            let dst = match std::str::from_utf8(segs[2]) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            let properties = deserialize_props(&v)?;
             edges.push(Edge {
-                src,
-                edge_type,
-                dst,
+                src: src.to_string(),
+                edge_type: edge_type.to_string(),
+                dst: dst.to_string(),
                 properties,
             });
         }
@@ -376,6 +335,24 @@ impl<'s> EdgeStore<'s> {
         }
         let bytes = serialize_props(&props)?;
         self.storage.put(&out_key, &bytes)
+    }
+}
+
+/// How much of each edge entry a scan should materialize.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanMode {
+    /// Read keys only; edge properties come back empty.
+    KeysOnly,
+    /// Read and deserialize each edge's MessagePack properties.
+    WithProperties,
+}
+
+/// Extract the numeric `"weight"` property, defaulting to `1.0`.
+fn edge_weight(properties: &BTreeMap<String, Value>) -> f64 {
+    match properties.get("weight") {
+        Some(Value::Float(f)) => *f,
+        Some(Value::Int(n)) => *n as f64,
+        _ => 1.0,
     }
 }
 

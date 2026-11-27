@@ -303,6 +303,15 @@ pub fn index_catalog_prefix(ns: &str, db: &str, table: &str) -> Vec<u8> {
         .build()
 }
 
+/// Prefix for every index-catalog entry in a namespace/database, across all
+/// tables: `ns\0db\0`.
+///
+/// Backs catalog introspection (listing every defined index) without knowing
+/// the table names up front.
+pub fn catalog_prefix(ns: &str, db: &str) -> Vec<u8> {
+    KeyBuilder::new().namespace(ns).database(db).build()
+}
+
 /// Prefix for all index *entries* of a single index:
 /// `ns\0db\0table\0+<index_name>\0`.
 ///

@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/storage",
-    "crates/transaction",
     "crates/document",
     "crates/graph",
     "crates/search",
@@ -25,7 +24,6 @@ description = "dllb -- a multi-model NoSQL DBMS with native graphs, documents, f
 # Internal crates
 dllb-core = { path = "crates/core" }
 dllb-storage = { path = "crates/storage" }
-dllb-transaction = { path = "crates/transaction" }
 dllb-document = { path = "crates/document" }
 dllb-graph = { path = "crates/graph" }
 dllb-search = { path = "crates/search" }

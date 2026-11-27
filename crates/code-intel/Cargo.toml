@@ -9,8 +9,6 @@ description = "AST/MetaAST schemas, code-aware tokenizer, structural pattern mat
 dllb-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
-
 [dev-dependencies]
 tempfile = "3.27.0"
 dllb-storage = { workspace = true }

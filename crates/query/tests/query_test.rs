@@ -2656,3 +2656,74 @@ fn test_ast_builtins_integration() {
     let rows_filter_empty = rows_of(res_filter_empty);
     assert_eq!(rows_filter_empty.len(), 0);
 }
+
+// -------------------------------------------------------------------
+// Catalog introspection
+// -------------------------------------------------------------------
+
+#[test]
+fn describe_indexes_lists_every_kind_across_tables() {
+    let (dir, storage) = temp_storage();
+    let e = exec_with_search(&storage, &dir);
+
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+    e.run("DEFINE INDEX by_email ON user FIELDS email UNIQUE;")
+        .unwrap();
+    e.run("DEFINE FULLTEXT INDEX ft ON article FIELDS body ANALYZER english;")
+        .unwrap();
+    e.run("DEFINE VECTOR INDEX vec ON article FIELDS emb DIMENSION 4 METRIC cosine;")
+        .unwrap();
+
+    let rows = e.describe_indexes().unwrap();
+    assert_eq!(rows.len(), 4);
+
+    // Sorted by (table, name): article.ft, article.vec, user.by_age, user.by_email
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|r| match r.get("name") {
+            Some(Value::String(s)) => s.as_str(),
+            other => panic!("expected string name, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["ft", "vec", "by_age", "by_email"]);
+
+    // Kinds are reported with their parameters.
+    assert_eq!(
+        rows[0].get("kind"),
+        Some(&Value::String("fulltext(english)".into()))
+    );
+    assert_eq!(
+        rows[1].get("kind"),
+        Some(&Value::String("vector(cosine, 4)".into()))
+    );
+    assert_eq!(rows[2].get("kind"), Some(&Value::String("btree".into())));
+
+    // Uniqueness and fields round-trip.
+    assert_eq!(rows[3].get("unique"), Some(&Value::Bool(true)));
+    assert_eq!(
+        rows[2].get("fields"),
+        Some(&Value::Array(vec![Value::String("age".into())]))
+    );
+    assert_eq!(rows[2].get("table"), Some(&Value::String("user".into())));
+}
+
+#[test]
+fn describe_indexes_is_empty_for_a_fresh_database() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    assert!(e.describe_indexes().unwrap().is_empty());
+}
+
+#[test]
+fn describe_indexes_reflects_removal() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("DEFINE INDEX by_age ON user FIELDS age;").unwrap();
+    assert_eq!(e.describe_indexes().unwrap().len(), 1);
+
+    e.run("REMOVE INDEX by_age ON user;").unwrap();
+    assert!(
+        e.describe_indexes().unwrap().is_empty(),
+        "a removed index must disappear from the catalog"
+    );
+}

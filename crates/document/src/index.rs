@@ -439,6 +439,34 @@ pub fn load_index_definitions(
     Ok(defs)
 }
 
+/// Load every index definition in a namespace/database, across all tables.
+///
+/// Returns `(table, definition)` pairs. Backs catalog introspection, which
+/// cannot know the table names up front.
+pub fn load_all_index_definitions(
+    storage: &DllbStorage,
+    ns: &str,
+    db: &str,
+) -> Result<Vec<(String, IndexDefinition)>> {
+    let prefix = key::catalog_prefix(ns, db);
+    let entries = storage.prefix_scan(&prefix)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let parts = key::parse_key(&k)?;
+        // Only the `!idx\0<name>` sub-namespace holds index definitions;
+        // other metadata entries are skipped.
+        if !parts.remainder.starts_with(b"idx\0") {
+            continue;
+        }
+        let def: IndexDefinition =
+            rmp_serde::from_slice(&v).map_err(|e| Error::Serialization(e.to_string()))?;
+        let table =
+            String::from_utf8(parts.table.to_vec()).map_err(|e| Error::Storage(e.to_string()))?;
+        out.push((table, def));
+    }
+    Ok(out)
+}
+
 /// Check whether a unique index tuple already exists for a different record.
 ///
 /// `values` is the full tuple of indexed field values (one per index field).

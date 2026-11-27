@@ -146,6 +146,39 @@ impl<'s> QueryExecutor<'s> {
         }
     }
 
+    /// Describe every index defined in this namespace/database.
+    ///
+    /// There is no `SHOW INDEXES` statement in the language; this backs the
+    /// CLI's `.indexes` command and any embedding caller that wants to know
+    /// what the planner can use. Rows are sorted by `(table, name)`.
+    pub fn describe_indexes(&self) -> Result<Vec<BTreeMap<String, Value>>> {
+        let mut defs = index::load_all_index_definitions(self.storage, &self.ns, &self.db)?;
+        defs.sort_by(|(ta, a), (tb, b)| ta.cmp(tb).then_with(|| a.name.cmp(&b.name)));
+
+        Ok(defs
+            .into_iter()
+            .map(|(table, def)| {
+                let mut row = BTreeMap::new();
+                row.insert("table".into(), Value::String(table));
+                row.insert("name".into(), Value::String(def.name));
+                row.insert(
+                    "fields".into(),
+                    Value::Array(def.fields.into_iter().map(Value::String).collect()),
+                );
+                row.insert("unique".into(), Value::Bool(def.unique));
+                row.insert(
+                    "kind".into(),
+                    Value::String(match def.kind {
+                        IndexKind::BTree => "btree".to_string(),
+                        IndexKind::FullText { analyzer } => format!("fulltext({analyzer})"),
+                        IndexKind::Vector { dim, metric } => format!("vector({metric}, {dim})"),
+                    }),
+                );
+                row
+            })
+            .collect())
+    }
+
     /// Execute a parsed statement.
     pub fn execute(&self, stmt: &Statement) -> Result<QueryResult> {
         match stmt {
@@ -473,8 +506,9 @@ impl<'s> QueryExecutor<'s> {
         if self.services.is_some()
             && let Some(stored) = coll.get(&id_str)?
         {
-            self.maintain_search_indexes(table, &id_str, Some(&stored), coll.indexes())?;
-            self.commit_search()?;
+            self.maintainer()
+                .maintain(table, &id_str, Some(&stored), coll.indexes())?;
+            self.maintainer().commit()?;
         }
 
         Ok(result)
@@ -747,13 +781,13 @@ impl<'s> QueryExecutor<'s> {
                 match coll.merge_returning(&r.id, update_fields) {
                     Ok(stored) => {
                         if self.services.is_some() {
-                            self.maintain_search_indexes(
+                            self.maintainer().maintain(
                                 &r.table,
                                 &r.id,
                                 Some(&stored),
                                 coll.indexes(),
                             )?;
-                            self.commit_search()?;
+                            self.maintainer().commit()?;
                         }
                         Ok(QueryResult::Update { matched: 1 })
                     }
@@ -778,7 +812,7 @@ impl<'s> QueryExecutor<'s> {
                         // so reindexing costs no extra read.
                         let stored = coll.merge_returning(&doc.id.id, update_fields.clone())?;
                         if services_on {
-                            self.maintain_search_indexes(
+                            self.maintainer().maintain(
                                 table,
                                 &doc.id.id,
                                 Some(&stored),
@@ -789,7 +823,7 @@ impl<'s> QueryExecutor<'s> {
                     }
                 }
                 if services_on && matched > 0 {
-                    self.commit_search()?;
+                    self.maintainer().commit()?;
                 }
                 Ok(QueryResult::Update { matched })
             }
@@ -918,6 +952,11 @@ impl<'s> QueryExecutor<'s> {
             table,
             Arc::clone(&self.versions),
         )
+    }
+
+    /// A [`Maintainer`] over this executor's storage and search services.
+    fn maintainer(&self) -> crate::maintain::Maintainer<'_, 's> {
+        crate::maintain::Maintainer::new(self.storage, &self.ns, &self.db, self.services.as_ref())
     }
 
     fn exec_graph_components(&self, table: &str) -> Result<QueryResult> {
@@ -1184,10 +1223,11 @@ impl<'s> QueryExecutor<'s> {
             for (tbl, id) in &search_creates {
                 let coll = Collection::new(self.storage, &self.ns, &self.db, tbl);
                 if let Some(stored) = coll.get(id)? {
-                    self.maintain_search_indexes(tbl, id, Some(&stored), &idx_cache[tbl])?;
+                    self.maintainer()
+                        .maintain(tbl, id, Some(&stored), &idx_cache[tbl])?;
                 }
             }
-            self.commit_search()?;
+            self.maintainer().commit()?;
         }
 
         let count = stmts.len();
@@ -1206,8 +1246,9 @@ impl<'s> QueryExecutor<'s> {
         if existed && self.services.is_some() {
             // Remove the document from any full-text/vector indexes (delete is
             // by id, so the document body is not needed).
-            self.maintain_search_indexes(table, id, None, coll.indexes())?;
-            self.commit_search()?;
+            self.maintainer()
+                .maintain(table, id, None, coll.indexes())?;
+            self.maintainer().commit()?;
         }
         Ok(QueryResult::Deleted { existed })
     }
@@ -1241,9 +1282,10 @@ impl<'s> QueryExecutor<'s> {
 
         if self.services.is_some() && count > 0 {
             for id in &matching {
-                self.maintain_search_indexes(table, id, None, coll.indexes())?;
+                self.maintainer()
+                    .maintain(table, id, None, coll.indexes())?;
             }
-            self.commit_search()?;
+            self.maintainer().commit()?;
         }
 
         Ok(QueryResult::DeletedMany { count })
@@ -1516,7 +1558,8 @@ impl<'s> QueryExecutor<'s> {
         if let IndexKind::Vector { dim, metric } = &def.kind {
             // Rebuild the in-memory index from stored embeddings if this
             // process has not populated it yet (HNSW is not persisted).
-            self.ensure_vector_loaded(table, &def, *dim, metric)?;
+            self.maintainer()
+                .ensure_vector_loaded(table, &def, *dim, metric)?;
         }
 
         let query: Vec<f32> = vector.iter().map(|f| *f as f32).collect();
@@ -1591,7 +1634,8 @@ impl<'s> QueryExecutor<'s> {
         }
         let vec_def = self.find_search_index(table, vector_field, SearchKind::Vector)?;
         if let IndexKind::Vector { dim, metric } = &vec_def.kind {
-            self.ensure_vector_loaded(table, &vec_def, *dim, metric)?;
+            self.maintainer()
+                .ensure_vector_loaded(table, &vec_def, *dim, metric)?;
         }
 
         let alpha = alpha.unwrap_or(0.5).clamp(0.0, 1.0);
@@ -1679,125 +1723,6 @@ impl<'s> QueryExecutor<'s> {
                     want.label()
                 ))
             })
-    }
-
-    /// Ensure a vector index is present in memory, rebuilding it from stored
-    /// documents when necessary (HNSW is in-memory only, so a fresh process
-    /// starts empty).
-    fn ensure_vector_loaded(
-        &self,
-        table: &str,
-        def: &IndexDefinition,
-        dim: usize,
-        metric: &str,
-    ) -> Result<()> {
-        let Some(services) = &self.services else {
-            return Ok(());
-        };
-        let parsed_metric = search::parse_metric(metric)?;
-
-        // Atomically fetch or create the entry to prevent race conditions on setup.
-        let entry = services.get_or_create_vector(&def.name, dim, parsed_metric)?;
-
-        // If it is already loaded, we can return immediately.
-        if entry.loaded.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        // Lock to ensure only one thread performs the rebuild backfill.
-        let _guard = entry
-            .rebuild_lock
-            .lock()
-            .map_err(|_| dllb_core::Error::Index("vector rebuild lock poisoned".into()))?;
-
-        // Double-check after acquiring lock.
-        if entry.loaded.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        let Some(field) = def.fields.first() else {
-            entry
-                .loaded
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            return Ok(());
-        };
-
-        let coll = Collection::new(self.storage, &self.ns, &self.db, table);
-        for doc in coll.scan_all()? {
-            if let Some(v) = doc.fields.get(field).and_then(search::value_to_vector) {
-                services.vector_insert(&def.name, &doc.id.id, v)?;
-            }
-        }
-
-        entry
-            .loaded
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// Maintain full-text/vector indexes after a single-document mutation.
-    ///
-    /// `doc` is the post-write document for a create/update, or `None` for a
-    /// delete. `defs` is the table's already-loaded catalog (so this adds no
-    /// extra scan). No-op when search services are disabled. Full-text writes
-    /// are buffered; the caller must call [`commit_search`](Self::commit_search).
-    fn maintain_search_indexes(
-        &self,
-        table: &str,
-        id: &str,
-        doc: Option<&Document>,
-        defs: &[IndexDefinition],
-    ) -> Result<()> {
-        let Some(services) = &self.services else {
-            return Ok(());
-        };
-        for def in defs {
-            let Some(field) = def.fields.first() else {
-                continue;
-            };
-            match &def.kind {
-                IndexKind::FullText { analyzer } => {
-                    services.ensure_fulltext(table, field, analyzer)?;
-                    match doc
-                        .and_then(|d| d.fields.get(field))
-                        .and_then(search::value_to_text)
-                    {
-                        Some(text) => services.fts_index(table, field, id, text)?,
-                        None => services.fts_delete(table, field, id)?,
-                    }
-                }
-                IndexKind::Vector { dim, metric } => {
-                    match doc
-                        .and_then(|d| d.fields.get(field))
-                        .and_then(search::value_to_vector)
-                    {
-                        Some(v) => {
-                            self.ensure_vector_loaded(table, def, *dim, metric)?;
-                            services.vector_insert(&def.name, id, v)?;
-                        }
-                        // A delete (or a row that no longer carries a vector)
-                        // need only touch an already-loaded index; an unloaded
-                        // one reflects storage when next rebuilt.
-                        None => {
-                            if services.vector_exists(&def.name)? {
-                                services.vector_remove(&def.name, id)?;
-                            }
-                        }
-                    }
-                }
-                IndexKind::BTree => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Commit buffered full-text writes so prior maintenance becomes visible
-    /// to searches. No-op when services are disabled.
-    fn commit_search(&self) -> Result<()> {
-        if let Some(services) = &self.services {
-            services.fts_commit()?;
-        }
-        Ok(())
     }
 
     fn exec_relate(

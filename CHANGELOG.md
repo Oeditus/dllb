@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored.
 - `SELECT` column names for string literals now escape embedded quotes
   (`'it''s'`), so distinct literals never collapse onto one column.
+- The server acknowledges `BEGIN BATCH` with `{"status":"batch_started"}`,
+  reports a connection that closes mid-batch instead of silently discarding
+  the buffered statements, and honours the requested `OUTCOME` format on
+  execution errors (a CSV client no longer receives a JSON error body).
+- `EdgeStore`'s three whole-table scanners are now one parameterised
+  implementation (`ScanMode`).
+- Removed the empty `dllb-transaction` crate and ~20 unused dependencies
+  across the workspace.
 - Record ids produced by `dllb-code-intel` ingestion percent-encode the
   `file_path` (`lib/my_app.ex` becomes `lib%2Fmy_app.ex`), so generated
   batches always parse. Previously any path containing a space or other
@@ -54,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Collection::merge_returning` and `Collection::delete_many`.
 - `dllb_graph::WriteVersions` and `global_write_versions()`, re-exported from
   `dllb_query`.
+- `dllb-cli` dot-commands: `.indexes` renders the index catalog as a table,
+  `.schema` explains the schemaless/schemafull split, and unknown dot-commands
+  are reported instead of being sent to the query engine.
+- `dllb-cli` drives the `BEGIN BATCH` / `END BATCH` protocol with a
+  `dllb[batch]>` prompt; Ctrl-C discards the batch instead of exiting.
+- `QueryExecutor::describe_indexes()` and
+  `dllb_document::index::load_all_index_definitions()` for catalog
+  introspection.
+- `dllb_core::Value` implements `Display`, so CLI output and error messages
+  render values readably instead of as serde-tagged enums.
+- `dllb_query::Maintainer`, which owns full-text/vector index lifecycle.
 - Unit tests for the executor's pure helpers (`cmp_values`, `order_cmp`,
   `group_key`, `normalize_scores`, `candidate_pool`, `plan_index_lookup`,
   `sort_documents`) and for all three output formats.

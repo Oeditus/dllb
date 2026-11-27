@@ -240,8 +240,20 @@ cargo run --release -p dllb-server
 #### Run the CLI
 
 ```bash
-cargo run --release -p dllb-cli
+cargo run --release -p dllb-cli -- --path dllb.redb --ns default --db default
 ```
+
+The CLI opens the database file **embedded**, so `dllb-server` must not be
+holding the same file. Useful in-REPL commands:
+
+| Command | Description |
+|---------|-------------|
+| `.help` | Full grammar reference |
+| `.indexes` | List every defined index, its kind, fields, and uniqueness |
+| `.schema` | Explain the schemaless / schemafull split |
+| `.quit` | Exit |
+
+`dllb-cli --version` and `--help` work without opening a database.
 
 ### Run Tests
 

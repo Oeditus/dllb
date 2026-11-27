@@ -466,14 +466,11 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 name = "dllb-cli"
 version = "1.1.0"
 dependencies = [
- "dllb-core",
  "dllb-query",
  "dllb-storage",
  "marcli",
  "rustyline",
  "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -487,16 +484,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
 name = "dllb-core"
 version = "1.1.0"
 dependencies = [
- "bytes",
- "half",
- "rmp-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -514,8 +507,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -526,9 +517,7 @@ dependencies = [
  "dllb-core",
  "dllb-storage",
  "rmp-serde",
- "serde",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -545,7 +534,6 @@ dependencies = [
  "lru 0.19.0",
  "serde_json",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -556,7 +544,6 @@ dependencies = [
  "dllb-core",
  "tantivy",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -579,7 +566,6 @@ version = "1.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "crc32fast",
  "criterion",
  "dllb-core",
  "dllb-document",
@@ -613,7 +599,6 @@ dependencies = [
  "dllb-core",
  "rand 0.10.4",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -867,7 +852,6 @@ checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
  "cfg-if",
  "crunchy",
- "serde",
  "zerocopy",
 ]
 

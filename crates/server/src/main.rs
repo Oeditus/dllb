@@ -376,12 +376,26 @@ async fn handle_connection<R, W>(
 
         // --- BEGIN BATCH / END BATCH protocol ---
         if query.eq_ignore_ascii_case("BEGIN BATCH") {
+            // Acknowledge the mode switch: without this a client that typed
+            // BEGIN BATCH by accident sees every subsequent query silently
+            // buffered and no output at all.
+            if writer
+                .write_all(b"{\"status\":\"batch_started\"}\n")
+                .await
+                .is_err()
+            {
+                break;
+            }
+
             let mut batch_stmts: Vec<dllb_query::ast::Statement> = Vec::new();
             let mut batch_err: Option<String> = None;
+            let mut batch_outcome = dllb_query::OutcomeFormat::Json;
+            let mut closed = false;
 
             while let Ok(Some(batch_line)) = lines.next_line().await {
                 let bq = batch_line.trim().trim_end_matches(';').trim();
                 if bq.eq_ignore_ascii_case("END BATCH") {
+                    closed = true;
                     break;
                 }
                 if bq.is_empty() {
@@ -392,15 +406,27 @@ async fn handle_connection<R, W>(
                     continue;
                 }
                 match dllb_query::parse(bq) {
-                    Ok(q) => batch_stmts.push(q.statement),
+                    Ok(q) => {
+                        batch_outcome = q.outcome;
+                        batch_stmts.push(q.statement);
+                    }
                     Err(err) => {
-                        batch_err = Some(format_error(&err, dllb_query::OutcomeFormat::Json));
+                        batch_err = Some(format_error(&err, batch_outcome));
                     }
                 }
             }
 
             let response = if let Some(err_resp) = batch_err {
                 err_resp
+            } else if !closed {
+                // The connection ended mid-batch: report it rather than
+                // silently discarding the buffered statements.
+                format_error(
+                    &dllb_core::Error::Query(
+                        "connection closed inside BEGIN BATCH; no statements were applied".into(),
+                    ),
+                    batch_outcome,
+                )
             } else {
                 let executor = QueryExecutor::new_with_services(
                     &storage,
@@ -411,8 +437,8 @@ async fn handle_connection<R, W>(
                     Arc::clone(&search),
                 );
                 match executor.execute_batch(&batch_stmts) {
-                    Ok(result) => format_result(&result, dllb_query::OutcomeFormat::Json),
-                    Err(err) => format_error(&err, dllb_query::OutcomeFormat::Json),
+                    Ok(result) => format_result(&result, batch_outcome),
+                    Err(err) => format_error(&err, batch_outcome),
                 }
             };
 
@@ -436,7 +462,15 @@ async fn handle_connection<R, W>(
         );
         let response = match executor.run(query) {
             Ok((result, outcome)) => format_result(&result, outcome),
-            Err(err) => format_error(&err, dllb_query::OutcomeFormat::Json),
+            // A parse failure has no `OUTCOME` clause to honour, but an
+            // execution failure does: re-parse to recover the requested
+            // format so a CSV client does not receive JSON on error.
+            Err(err) => {
+                let outcome = dllb_query::parse(query)
+                    .map(|q| q.outcome)
+                    .unwrap_or(dllb_query::OutcomeFormat::Json);
+                format_error(&err, outcome)
+            }
         };
 
         if writer
