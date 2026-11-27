@@ -381,6 +381,14 @@ impl<'s> Collection<'s> {
     ///
     /// Existing fields not in `fields` are preserved.
     pub fn merge(&self, id: &str, fields: BTreeMap<String, Value>) -> Result<()> {
+        self.merge_returning(id, fields).map(|_| ())
+    }
+
+    /// Like [`merge`](Self::merge), but returns the post-write document.
+    ///
+    /// Callers that must reindex the document afterwards (full-text, vector)
+    /// use this to avoid a second read of what was just written.
+    pub fn merge_returning(&self, id: &str, fields: BTreeMap<String, Value>) -> Result<Document> {
         let old = self
             .get(id)?
             .ok_or_else(|| Error::NotFound(format!("record not found: {id}")))?;
@@ -399,7 +407,8 @@ impl<'s> Collection<'s> {
             validate_document(&new_doc, schema)?;
         }
 
-        self.replace_with_indexes(id, &old, &new_doc)
+        self.replace_with_indexes(id, &old, &new_doc)?;
+        Ok(new_doc)
     }
 
     /// Internal: atomically replace a document and update its index entries.
@@ -452,6 +461,42 @@ impl<'s> Collection<'s> {
         self.storage.delete_batch(&keys_to_delete)?;
 
         Ok(true)
+    }
+
+    /// Delete many documents in a single storage transaction.
+    ///
+    /// Returns the number of documents that existed. Ids are resolved with one
+    /// shared read transaction and all document + index-entry deletions are
+    /// applied in one `write_batch`, so deleting N rows costs one commit
+    /// instead of N.
+    pub fn delete_many(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let docs = self.get_many(ids)?;
+        if docs.is_empty() {
+            return Ok(0);
+        }
+
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(docs.len() * 2);
+        for doc in &docs {
+            keys.push(key::document_key(
+                &self.ns,
+                &self.db,
+                &self.table,
+                &doc.id.id,
+            ));
+            for (k, _) in
+                index::build_index_entries(doc, &self.ns, &self.db, &self.table, &self.indexes)?
+            {
+                keys.push(k);
+            }
+        }
+
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        self.storage.delete_batch(&key_refs)?;
+        Ok(docs.len())
     }
 
     // -------------------------------------------------------------------

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use dllb_query::{
-    ComputeCache, QueryExecutor, SearchServices, WriteVersions, format_error, format_result,
+    ComputeCache, QueryExecutor, SearchServices, format_error, format_result, global_write_versions,
 };
 use dllb_storage::db::DllbStorage;
 
@@ -121,7 +121,7 @@ enum ConnectionStream {
 struct ServerState {
     storage: Arc<DllbStorage>,
     cache: Arc<ComputeCache>,
-    versions: Arc<WriteVersions>,
+    versions: Arc<dllb_graph::WriteVersions>,
     search: Arc<SearchServices>,
     ns: String,
     db: String,
@@ -151,10 +151,11 @@ async fn main() {
 
     // Process-wide compute cache and write-version map shared across all
     // connection handlers. A cache entry built by one connection is served to
-    // all subsequent connections; a RELATE on any connection immediately
+    // all subsequent connections. The version map is the same registry that
+    // `EdgeStore` bumps, so any edge mutation -- from any connection --
     // invalidates the relevant analytics entries.
     let cache = Arc::new(ComputeCache::default());
-    let versions = Arc::new(WriteVersions::default());
+    let versions = global_write_versions();
 
     // Process-wide full-text/vector index services, shared across all
     // connection handlers. Tantivy indexes live on disk beside the database

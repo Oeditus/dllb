@@ -60,7 +60,10 @@ pub enum Statement {
     },
     /// `DELETE table:id;`
     Delete { table: String, id: String },
-    /// `DELETE <table> [WHERE clause];` -- delete every matching row.
+    /// `DELETE <table> WHERE clause` or `DELETE ALL FROM <table>` -- delete
+    /// every matching row. `filter` is `None` only for the explicit
+    /// `DELETE ALL FROM <table>` form; a bare `DELETE <table>` is a parse
+    /// error so a missing `WHERE` can never wipe a table silently.
     DeleteWhere {
         table: String,
         filter: Option<WhereClause>,
@@ -221,17 +224,16 @@ pub enum SelectItem {
 }
 
 impl SelectItem {
+    /// The key this item occupies in a result row.
+    ///
+    /// Field names are used verbatim. Literals and function calls are
+    /// rendered back into source-like text, with string literals escaped the
+    /// same way the tokenizer accepts them (`''` for an embedded quote), so
+    /// distinct items never collapse onto the same column name.
     pub fn column_name(&self) -> String {
         match self {
             SelectItem::Field(name) => name.clone(),
-            SelectItem::Literal(lit) => match lit {
-                Literal::String(s) => format!("'{}'", s),
-                Literal::Int(n) => n.to_string(),
-                Literal::Float(f) => f.to_string(),
-                Literal::Bool(b) => b.to_string(),
-                Literal::None => "NONE".to_string(),
-                Literal::Array(arr) => format!("{:?}", arr),
-            },
+            SelectItem::Literal(lit) => lit.to_source(),
             SelectItem::FunctionCall { name, args } => {
                 let arg_strs: Vec<String> = args.iter().map(|a| a.column_name()).collect();
                 format!("{}({})", name, arg_strs.join(", "))
@@ -356,5 +358,30 @@ impl Literal {
                 dllb_core::Value::Array(items.iter().map(Literal::to_value).collect())
             }
         }
+    }
+
+    /// Render this literal back into query-language source text.
+    ///
+    /// Strings are wrapped in single quotes with embedded quotes doubled --
+    /// the exact escaping the tokenizer accepts -- so the rendering is
+    /// unambiguous and can be re-parsed into an equal literal.
+    pub fn to_source(&self) -> String {
+        match self {
+            Literal::String(s) => format!("'{}'", s.replace('\'', "''")),
+            Literal::Int(n) => n.to_string(),
+            Literal::Float(f) => f.to_string(),
+            Literal::Bool(b) => b.to_string(),
+            Literal::None => "NONE".to_string(),
+            Literal::Array(items) => {
+                let parts: Vec<String> = items.iter().map(Literal::to_source).collect();
+                format!("[{}]", parts.join(", "))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Literal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_source())
     }
 }

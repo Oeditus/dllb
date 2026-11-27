@@ -128,9 +128,13 @@ fn concurrent_readers() {
     let (_dir, db) = temp_db();
     db.put(b"shared", b"value").unwrap();
 
+    // `RedbBackend` is shared by reference rather than cloned so that
+    // compaction keeps its `&mut Database` reachable; wrap it in an `Arc` for
+    // the threads.
+    let db = std::sync::Arc::new(db);
     let handles: Vec<_> = (0..4)
         .map(|_| {
-            let db = db.clone();
+            let db = std::sync::Arc::clone(&db);
             std::thread::spawn(move || {
                 for _ in 0..100 {
                     assert_eq!(db.get(b"shared").unwrap(), Some(b"value".to_vec()));

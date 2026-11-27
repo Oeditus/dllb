@@ -413,3 +413,70 @@ fn empty_traversal() {
     assert!(t.outgoing("nobody").unwrap().is_empty());
     assert!(t.incoming("nobody").unwrap().is_empty());
 }
+
+// -------------------------------------------------------------------
+// Write-version invalidation
+// -------------------------------------------------------------------
+
+#[test]
+fn edge_mutations_bump_the_shared_write_version() {
+    // Analytics caches are keyed on this counter, so every mutation path --
+    // relate and delete -- must advance it, and only for its own table.
+    let (_dir, storage) = temp_storage();
+    let versions = std::sync::Arc::new(dllb_graph::WriteVersions::default());
+    let store = EdgeStore::with_versions(
+        &storage,
+        "ns",
+        "db",
+        "edges",
+        std::sync::Arc::clone(&versions),
+    );
+
+    assert_eq!(versions.current("ns", "db", "edges"), 0);
+
+    store.relate(&Edge::new("alice", "knows", "bob")).unwrap();
+    assert_eq!(versions.current("ns", "db", "edges"), 1);
+
+    store.relate(&Edge::new("alice", "knows", "carol")).unwrap();
+    assert_eq!(versions.current("ns", "db", "edges"), 2);
+
+    assert!(store.delete("alice", "knows", "bob").unwrap());
+    assert_eq!(versions.current("ns", "db", "edges"), 3);
+
+    // A no-op delete must not bump: nothing changed, so nothing is stale.
+    assert!(!store.delete("alice", "knows", "bob").unwrap());
+    assert_eq!(versions.current("ns", "db", "edges"), 3);
+
+    // Other tables are untouched.
+    assert_eq!(versions.current("ns", "db", "other"), 0);
+}
+
+#[test]
+fn global_write_versions_is_a_single_shared_instance() {
+    // Two separate `EdgeStore`s built with the global registry must observe
+    // each other's bumps -- that is what makes cross-connection cache
+    // invalidation work.
+    let (_dir, storage) = temp_storage();
+    let writer = EdgeStore::with_versions(
+        &storage,
+        "ns",
+        "db",
+        "shared",
+        dllb_graph::global_write_versions(),
+    );
+    let reader = EdgeStore::with_versions(
+        &storage,
+        "ns",
+        "db",
+        "shared",
+        dllb_graph::global_write_versions(),
+    );
+
+    let before = dllb_graph::global_write_versions().current("ns", "db", "shared");
+    writer.relate(&Edge::new("a", "calls", "b")).unwrap();
+    let after = dllb_graph::global_write_versions().current("ns", "db", "shared");
+
+    assert_eq!(after, before + 1);
+    // The second store sees the same counter.
+    assert_eq!(Traversal::new(&reader).outgoing("a").unwrap().len(), 1);
+}

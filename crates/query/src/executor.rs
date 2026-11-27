@@ -62,6 +62,10 @@ pub enum QueryResult {
         largest: i64,
         nodes: i64,
     },
+    /// Result of a `COMPACT` statement. `reclaimed` is `false` when the
+    /// database had no free space to reclaim, which is common right after a
+    /// write and worth reporting rather than hiding behind a bare `ok`.
+    Compacted { reclaimed: bool },
 }
 
 /// Executes parsed statements against the storage layer.
@@ -193,8 +197,8 @@ impl<'s> QueryExecutor<'s> {
             } => self.exec_define_index(name, table, fields, *unique),
             Statement::RemoveIndex { name, table } => self.exec_remove_index(name, table),
             Statement::Compact => {
-                self.storage.compact()?;
-                Ok(QueryResult::Ok)
+                let reclaimed = self.storage.compact()?;
+                Ok(QueryResult::Compacted { reclaimed })
             }
             Statement::DefineFulltextIndex {
                 name,
@@ -336,15 +340,14 @@ impl<'s> QueryExecutor<'s> {
     }
 
     /// Post-execution side effects:
-    /// - `RELATE` bumps the write version for the edge table.
-    /// - `GRAPH COMMUNITIES` stores the formatted result in the cache.
+    /// - `GRAPH COMMUNITIES` and the other analytics verbs store their
+    ///   formatted result in the cache.
+    ///
+    /// Write-version bumps are *not* done here: `EdgeStore` bumps the shared
+    /// registry itself on every successful edge mutation, so a relater that
+    /// never goes through this executor still invalidates the cache.
     fn post_execute(&self, stmt: &Statement, result: &QueryResult, outcome: OutcomeFormat) {
         match (stmt, result) {
-            // Bump write version whenever an edge is successfully written.
-            (Statement::Relate { edge_type, .. }, QueryResult::Ok) => {
-                self.versions.bump(&self.ns, &self.db, edge_type);
-            }
-
             // Populate cache after a successful communities computation.
             (
                 Statement::GraphCommunities {
@@ -485,8 +488,17 @@ impl<'s> QueryExecutor<'s> {
         order_by: &[OrderKey],
         limit: Option<u64>,
     ) -> Result<QueryResult> {
-        // Graph traversal has its own execution path (ordering is not applied).
+        // Graph traversal has its own execution path. ORDER BY is rejected
+        // rather than silently ignored: a user who asks for an ordering and
+        // gets unsorted rows has no way to notice the clause was dropped.
         if let SelectFields::Traversal(chain) = select_fields {
+            if !order_by.is_empty() {
+                return Err(dllb_core::Error::Query(
+                    "ORDER BY is not supported on a graph traversal SELECT; \
+                     sort the result client-side or use a plain SELECT"
+                        .into(),
+                ));
+            }
             return self.exec_traversal_select(chain, from, filter, limit);
         }
 
@@ -590,7 +602,7 @@ impl<'s> QueryExecutor<'s> {
         // plus an insertion-ordered vector -- O(1) amortized per neighbor
         // instead of the previous O(n) `Vec::contains` scan per neighbor.
         for hop in &chain.hops {
-            let es = EdgeStore::new(self.storage, &self.ns, &self.db, &hop.edge_type);
+            let es = self.edge_store(&hop.edge_type);
             let tv = Traversal::new(&es);
             let mut next_ids: Vec<String> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
@@ -660,7 +672,7 @@ impl<'s> QueryExecutor<'s> {
         max_iterations: usize,
         resolution: f64,
     ) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         let edges = store.scan_all_outgoing()?;
 
         let algo = match algorithm {
@@ -732,22 +744,22 @@ impl<'s> QueryExecutor<'s> {
             // Single-record update: merge fields if the record exists.
             FromTarget::Record(r) => {
                 let coll = Collection::load(self.storage, &self.ns, &self.db, &r.table)?;
-                if coll.get(&r.id)?.is_some() {
-                    coll.merge(&r.id, update_fields)?;
-                    if self.services.is_some()
-                        && let Some(stored) = coll.get(&r.id)?
-                    {
-                        self.maintain_search_indexes(
-                            &r.table,
-                            &r.id,
-                            Some(&stored),
-                            coll.indexes(),
-                        )?;
-                        self.commit_search()?;
+                match coll.merge_returning(&r.id, update_fields) {
+                    Ok(stored) => {
+                        if self.services.is_some() {
+                            self.maintain_search_indexes(
+                                &r.table,
+                                &r.id,
+                                Some(&stored),
+                                coll.indexes(),
+                            )?;
+                            self.commit_search()?;
+                        }
+                        Ok(QueryResult::Update { matched: 1 })
                     }
-                    Ok(QueryResult::Update { matched: 1 })
-                } else {
-                    Ok(QueryResult::Update { matched: 0 })
+                    // A missing record is a no-op update, not an error.
+                    Err(dllb_core::Error::NotFound(_)) => Ok(QueryResult::Update { matched: 0 }),
+                    Err(e) => Err(e),
                 }
             }
             // Table update: merge fields into every row matching the filter.
@@ -762,8 +774,10 @@ impl<'s> QueryExecutor<'s> {
                         None => true,
                     };
                     if keep {
-                        coll.merge(&doc.id.id, update_fields.clone())?;
-                        if services_on && let Some(stored) = coll.get(&doc.id.id)? {
+                        // `merge_returning` hands back the post-write document,
+                        // so reindexing costs no extra read.
+                        let stored = coll.merge_returning(&doc.id.id, update_fields.clone())?;
+                        if services_on {
                             self.maintain_search_indexes(
                                 table,
                                 &doc.id.id,
@@ -889,8 +903,25 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Rows(rows))
     }
 
+    /// Build an [`EdgeStore`] whose mutations invalidate this executor's
+    /// analytics cache.
+    ///
+    /// Every edge access in the executor must go through here: a plain
+    /// `EdgeStore::new` would bump a private counter and leave cached
+    /// `GRAPH COMMUNITIES` / `PAGERANK` / `CENTRALITY` / `COMPONENTS`
+    /// payloads stale.
+    fn edge_store(&self, table: &str) -> EdgeStore<'_> {
+        EdgeStore::with_versions(
+            self.storage,
+            &self.ns,
+            &self.db,
+            table,
+            Arc::clone(&self.versions),
+        )
+    }
+
     fn exec_graph_components(&self, table: &str) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         // Connectivity ignores weights, so use the key-only edge scan that
         // never deserializes edge properties.
         let edges = store.scan_all_edges()?;
@@ -928,7 +959,7 @@ impl<'s> QueryExecutor<'s> {
         max_iterations: usize,
         limit: Option<u64>,
     ) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         let edges = store.scan_all_outgoing()?;
         let opts = PageRankOptions {
             damping,
@@ -947,7 +978,7 @@ impl<'s> QueryExecutor<'s> {
         mode: CentralityMode,
         limit: Option<u64>,
     ) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         let edges = store.scan_all_edges()?;
         let kind = match mode {
             CentralityMode::Degree => CentralityKind::Degree,
@@ -959,7 +990,9 @@ impl<'s> QueryExecutor<'s> {
     }
 
     /// `GRAPH PATH <src> -> <dst> ON <table>`: a single row describing the
-    /// shortest directed path (`found`, `length`, `path`).
+    /// shortest directed path. When no path exists, `found` is `false` and
+    /// `length`/`path` are `NONE` -- a negative length would be a sentinel
+    /// masquerading as a value.
     fn exec_graph_path(
         &self,
         src: &str,
@@ -967,7 +1000,7 @@ impl<'s> QueryExecutor<'s> {
         table: &str,
         max_depth: Option<usize>,
     ) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         let edges = store.scan_all_edges()?;
         let mut row = BTreeMap::new();
         match shortest_path(&edges, src, dst, max_depth) {
@@ -984,8 +1017,8 @@ impl<'s> QueryExecutor<'s> {
             }
             None => {
                 row.insert("found".into(), Value::Bool(false));
-                row.insert("length".into(), Value::Int(-1));
-                row.insert("path".into(), Value::Array(Vec::new()));
+                row.insert("length".into(), Value::None);
+                row.insert("path".into(), Value::None);
             }
         }
         Ok(QueryResult::Rows(vec![row]))
@@ -996,7 +1029,7 @@ impl<'s> QueryExecutor<'s> {
     /// evaluated against each synthetic edge row, so `src`, `dst`, `weight`,
     /// and any edge property can be filtered.
     fn exec_graph_edges(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, table);
+        let store = self.edge_store(table);
         let edges = store.scan_all_outgoing_edges()?;
         let mut rows = Vec::with_capacity(edges.len());
         for edge in edges {
@@ -1121,7 +1154,7 @@ impl<'s> QueryExecutor<'s> {
                     dst,
                     fields,
                 } => {
-                    let store = EdgeStore::new(self.storage, &self.ns, &self.db, edge_type);
+                    let store = self.edge_store(edge_type);
                     let mut edge = Edge::new(&src.id, edge_type, &dst.id);
                     for (name, lit) in fields {
                         edge = edge.with_property(name, lit.to_value());
@@ -1159,13 +1192,6 @@ impl<'s> QueryExecutor<'s> {
 
         let count = stmts.len();
 
-        // Bump write versions for any edge types touched.
-        for stmt in stmts {
-            if let Statement::Relate { edge_type, .. } = stmt {
-                self.versions.bump(&self.ns, &self.db, edge_type);
-            }
-        }
-
         Ok(QueryResult::Batch {
             count,
             created,
@@ -1186,9 +1212,9 @@ impl<'s> QueryExecutor<'s> {
         Ok(QueryResult::Deleted { existed })
     }
 
-    /// `DELETE <table> [WHERE clause]`: delete every matching row, maintaining
-    /// secondary, full-text, and vector indexes. With no filter, deletes all
-    /// rows in the table.
+    /// `DELETE <table> WHERE clause` / `DELETE ALL FROM <table>`: delete every
+    /// matching row, maintaining secondary, full-text, and vector indexes.
+    /// All redb deletions land in one transaction.
     fn exec_delete_where(&self, table: &str, filter: Option<&WhereClause>) -> Result<QueryResult> {
         let coll = Collection::load(self.storage, &self.ns, &self.db, table)?;
         // Narrow candidates by index when the filter allows; otherwise scan.
@@ -1200,25 +1226,26 @@ impl<'s> QueryExecutor<'s> {
             None => coll.scan_all()?,
         };
 
-        let services_on = self.services.is_some();
-        let mut count = 0usize;
-        for doc in &docs {
-            if let Some(clause) = filter
-                && !matches_where(doc, clause)
-            {
-                continue;
+        // Apply the residual predicate, then delete the survivors in one
+        // transaction rather than one commit per row.
+        let matching: Vec<String> = docs
+            .into_iter()
+            .filter(|doc| match filter {
+                Some(clause) => matches_where(doc, clause),
+                None => true,
+            })
+            .map(|doc| doc.id.id)
+            .collect();
+
+        let count = coll.delete_many(&matching)?;
+
+        if self.services.is_some() && count > 0 {
+            for id in &matching {
+                self.maintain_search_indexes(table, id, None, coll.indexes())?;
             }
-            let id = &doc.id.id;
-            if coll.delete(id)? {
-                count += 1;
-                if services_on {
-                    self.maintain_search_indexes(table, id, None, coll.indexes())?;
-                }
-            }
-        }
-        if services_on && count > 0 {
             self.commit_search()?;
         }
+
         Ok(QueryResult::DeletedMany { count })
     }
 
@@ -1340,11 +1367,14 @@ impl<'s> QueryExecutor<'s> {
     // -------------------------------------------------------------------
 
     /// Borrow the shared search services, or fail with a clear message when
-    /// the server was started without them (B-tree DDL is unaffected).
+    /// this executor was built without them (B-tree DDL is unaffected).
     fn require_services(&self) -> Result<&Arc<SearchServices>> {
         self.services.as_ref().ok_or_else(|| {
             dllb_core::Error::Query(
-                "full-text and vector index features are not enabled on this server".into(),
+                "this executor has no full-text/vector index services; \
+                 construct it with `QueryExecutor::new_with_services` \
+                 (B-tree indexes work without them)"
+                    .into(),
             )
         })
     }
@@ -1777,7 +1807,7 @@ impl<'s> QueryExecutor<'s> {
         dst: &RecordRef,
         fields: &[(String, Literal)],
     ) -> Result<QueryResult> {
-        let store = EdgeStore::new(self.storage, &self.ns, &self.db, edge_type);
+        let store = self.edge_store(edge_type);
 
         let mut edge = Edge::new(&src.id, edge_type, &dst.id);
         for (name, lit) in fields {
@@ -2298,5 +2328,303 @@ fn cmp_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the pure helpers
+// ---------------------------------------------------------------------------
+//
+// The executor's behaviour is covered end to end by `tests/query_test.rs`;
+// these tests pin the small pure functions whose rules are easy to break and
+// hard to see from a query result.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- cmp_values ---------------------------------------------------------
+
+    #[test]
+    fn cmp_values_orders_like_typed_values() {
+        assert_eq!(
+            cmp_values(&Value::Int(1), &Value::Int(2)),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            cmp_values(&Value::String("a".into()), &Value::String("b".into())),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            cmp_values(&Value::Float(1.5), &Value::Float(1.5)),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn cmp_values_crosses_int_and_float() {
+        assert_eq!(
+            cmp_values(&Value::Int(2), &Value::Float(2.5)),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            cmp_values(&Value::Float(2.5), &Value::Int(2)),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            cmp_values(&Value::Int(3), &Value::Float(3.0)),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn cmp_values_returns_none_for_incomparable_types() {
+        assert_eq!(cmp_values(&Value::String("1".into()), &Value::Int(1)), None);
+        assert_eq!(cmp_values(&Value::Bool(true), &Value::Int(1)), None);
+        assert_eq!(cmp_values(&Value::None, &Value::None), None);
+    }
+
+    #[test]
+    fn cmp_values_returns_none_for_nan() {
+        assert_eq!(
+            cmp_values(&Value::Float(f64::NAN), &Value::Float(1.0)),
+            None
+        );
+    }
+
+    // -- order_cmp ----------------------------------------------------------
+
+    #[test]
+    fn order_cmp_sorts_missing_last() {
+        use std::cmp::Ordering;
+        assert_eq!(order_cmp(None, None), Ordering::Equal);
+        assert_eq!(order_cmp(None, Some(&Value::Int(1))), Ordering::Greater);
+        assert_eq!(order_cmp(Some(&Value::Int(1)), None), Ordering::Less);
+        assert_eq!(order_cmp(Some(&Value::None), None), Ordering::Equal);
+        assert_eq!(
+            order_cmp(Some(&Value::None), Some(&Value::Int(1))),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn order_cmp_treats_incomparable_as_equal() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            order_cmp(Some(&Value::String("x".into())), Some(&Value::Int(1))),
+            Ordering::Equal
+        );
+    }
+
+    // -- group_key ----------------------------------------------------------
+
+    #[test]
+    fn group_key_separates_types_and_buckets_none() {
+        assert_ne!(
+            group_key(&Value::Int(1)),
+            group_key(&Value::String("1".into()))
+        );
+        assert_ne!(group_key(&Value::Int(1)), group_key(&Value::Float(1.0)));
+        assert_eq!(group_key(&Value::None), group_key(&Value::None));
+    }
+
+    #[test]
+    fn group_key_distinguishes_floats_by_bits() {
+        assert_ne!(
+            group_key(&Value::Float(0.0)),
+            group_key(&Value::Float(-0.0))
+        );
+    }
+
+    // -- normalize_scores ---------------------------------------------------
+
+    #[test]
+    fn normalize_scores_maps_to_unit_interval() {
+        let hits = vec![("a".to_string(), 1.0f32), ("b".to_string(), 3.0f32)];
+        let norm = normalize_scores(&hits, false);
+        let a = norm.iter().find(|(id, _)| id == "a").unwrap().1;
+        let b = norm.iter().find(|(id, _)| id == "b").unwrap().1;
+        assert!((a - 0.0).abs() < 1e-6, "min should normalise to 0.0");
+        assert!((b - 1.0).abs() < 1e-6, "max should normalise to 1.0");
+    }
+
+    #[test]
+    fn normalize_scores_inverts_when_lower_is_better() {
+        let hits = vec![("near".to_string(), 0.1f32), ("far".to_string(), 0.9f32)];
+        let norm = normalize_scores(&hits, true);
+        let near = norm.iter().find(|(id, _)| id == "near").unwrap().1;
+        let far = norm.iter().find(|(id, _)| id == "far").unwrap().1;
+        assert!((near - 1.0).abs() < 1e-6, "nearest should score 1.0");
+        assert!((far - 0.0).abs() < 1e-6, "farthest should score 0.0");
+    }
+
+    #[test]
+    fn normalize_scores_all_equal_becomes_one() {
+        let hits = vec![("a".to_string(), 2.0f32), ("b".to_string(), 2.0f32)];
+        for (_, s) in normalize_scores(&hits, false) {
+            assert!((s - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn normalize_scores_empty_is_empty() {
+        assert!(normalize_scores(&[], false).is_empty());
+    }
+
+    // -- candidate_pool -----------------------------------------------------
+
+    #[test]
+    fn candidate_pool_over_fetches_only_when_filtering() {
+        assert_eq!(candidate_pool(10, false), 10);
+        assert_eq!(candidate_pool(10, true), 100);
+        assert_eq!(candidate_pool(usize::MAX, true), usize::MAX);
+    }
+
+    // -- plan_index_lookup --------------------------------------------------
+
+    fn btree(name: &str, fields: &[&str]) -> IndexDefinition {
+        IndexDefinition::btree(name, fields.iter().map(|f| f.to_string()).collect(), false)
+    }
+
+    fn cmp(field: &str, op: CmpOp, value: Literal) -> WhereClause {
+        WhereClause::Cmp {
+            field: SelectItem::Field(field.to_string()),
+            op,
+            value,
+        }
+    }
+
+    #[test]
+    fn plan_index_lookup_returns_none_without_indexes() {
+        let clause = cmp("age", CmpOp::Eq, Literal::Int(30));
+        assert!(plan_index_lookup(&[], &clause).is_none());
+    }
+
+    #[test]
+    fn plan_index_lookup_uses_equality_and_marks_covering() {
+        let idx = btree("by_age", &["age"]);
+        let clause = cmp("age", CmpOp::Eq, Literal::Int(30));
+        let plan = plan_index_lookup(std::slice::from_ref(&idx), &clause).unwrap();
+        assert_eq!(plan.index_name, "by_age");
+        assert_eq!(plan.eq, vec![Value::Int(30)]);
+        assert!(plan.covers, "a lone equality is fully covered");
+    }
+
+    #[test]
+    fn plan_index_lookup_marks_residual_when_conjuncts_remain() {
+        let idx = btree("by_age", &["age"]);
+        let clause = WhereClause::And(
+            Box::new(cmp("age", CmpOp::Eq, Literal::Int(30))),
+            Box::new(cmp("name", CmpOp::Eq, Literal::String("x".into()))),
+        );
+        let plan = plan_index_lookup(std::slice::from_ref(&idx), &clause).unwrap();
+        assert!(!plan.covers, "a residual conjunct must be re-applied");
+    }
+
+    #[test]
+    fn plan_index_lookup_ignores_index_on_a_non_leading_field() {
+        let idx = btree("by_a_b", &["a", "b"]);
+        let clause = cmp("b", CmpOp::Eq, Literal::Int(1));
+        assert!(plan_index_lookup(std::slice::from_ref(&idx), &clause).is_none());
+    }
+
+    #[test]
+    fn plan_index_lookup_consumes_range_on_the_field_after_the_prefix() {
+        let idx = btree("by_tenant_age", &["tenant", "age"]);
+        let clause = WhereClause::And(
+            Box::new(cmp("tenant", CmpOp::Eq, Literal::String("acme".into()))),
+            Box::new(cmp("age", CmpOp::Gt, Literal::Int(30))),
+        );
+        let plan = plan_index_lookup(std::slice::from_ref(&idx), &clause).unwrap();
+        assert_eq!(plan.eq, vec![Value::String("acme".into())]);
+        assert_eq!(plan.lower, Some((Value::Int(30), false)));
+        assert!(plan.covers);
+    }
+
+    #[test]
+    fn plan_index_lookup_skips_non_btree_indexes() {
+        let idx = IndexDefinition {
+            name: "ft".into(),
+            fields: vec!["body".into()],
+            unique: false,
+            kind: IndexKind::FullText {
+                analyzer: "default".into(),
+            },
+        };
+        let clause = cmp("body", CmpOp::Eq, Literal::String("x".into()));
+        assert!(
+            plan_index_lookup(std::slice::from_ref(&idx), &clause).is_none(),
+            "full-text indexes have no redb entries to scan"
+        );
+    }
+
+    #[test]
+    fn plan_index_lookup_prefers_the_index_consuming_more_conjuncts() {
+        let narrow = btree("by_age", &["age"]);
+        let wide = btree("by_age_name", &["age", "name"]);
+        let clause = WhereClause::And(
+            Box::new(cmp("age", CmpOp::Eq, Literal::Int(30))),
+            Box::new(cmp("name", CmpOp::Eq, Literal::String("x".into()))),
+        );
+        let plan = plan_index_lookup(&[narrow, wide], &clause).expect("one index must be chosen");
+        assert_eq!(plan.index_name, "by_age_name");
+        assert!(plan.covers);
+    }
+
+    // -- sort_documents -----------------------------------------------------
+
+    fn doc_with(id: &str, age: Option<i64>) -> Document {
+        let mut doc = Document::new(RecordId::new("user", id));
+        if let Some(age) = age {
+            doc.set("age", Value::Int(age));
+        }
+        doc
+    }
+
+    #[test]
+    fn sort_documents_orders_ascending_and_descending() {
+        let mut docs = vec![doc_with("a", Some(2)), doc_with("b", Some(1))];
+        sort_documents(
+            &mut docs,
+            &[OrderKey {
+                field: "age".into(),
+                descending: false,
+            }],
+        );
+        assert_eq!(docs[0].id.id, "b");
+        assert_eq!(docs[1].id.id, "a");
+
+        sort_documents(
+            &mut docs,
+            &[OrderKey {
+                field: "age".into(),
+                descending: true,
+            }],
+        );
+        assert_eq!(docs[0].id.id, "a");
+    }
+
+    #[test]
+    fn sort_documents_breaks_ties_with_the_next_key() {
+        let mut a = doc_with("a", Some(1));
+        a.set("name", Value::String("z".into()));
+        let mut b = doc_with("b", Some(1));
+        b.set("name", Value::String("a".into()));
+        let mut docs = vec![a, b];
+
+        sort_documents(
+            &mut docs,
+            &[
+                OrderKey {
+                    field: "age".into(),
+                    descending: false,
+                },
+                OrderKey {
+                    field: "name".into(),
+                    descending: false,
+                },
+            ],
+        );
+        assert_eq!(docs[0].id.id, "b", "tie on age broken by name");
     }
 }

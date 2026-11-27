@@ -187,19 +187,31 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
         }
 
         // String literal (single- or double-quoted).
+        // Supports SQL-style doubled-quote escaping ('' inside '...', "" inside "...").
         if c == '\'' || c == '"' {
             let quote = c;
             i += 1;
-            let start = i;
-            while i < chars.len() && chars[i] != quote {
-                i += 1;
+            let mut s = String::new();
+            let mut closed = false;
+            while i < chars.len() {
+                if chars[i] == quote {
+                    if i + 1 < chars.len() && chars[i + 1] == quote {
+                        s.push(quote);
+                        i += 2;
+                    } else {
+                        i += 1; // skip closing quote
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    s.push(chars[i]);
+                    i += 1;
+                }
             }
-            if i >= chars.len() {
+            if !closed {
                 return Err(Error::Query("unterminated string literal".into()));
             }
-            let s: String = chars[start..i].iter().collect();
             tokens.push(Token::StringLit(s));
-            i += 1; // skip closing quote
             continue;
         }
 
@@ -375,6 +387,34 @@ mod tests {
     fn tokenize_unterminated_string() {
         assert!(tokenize("'hello").is_err());
         assert!(tokenize("\"hello").is_err());
+    }
+
+    #[test]
+    fn tokenize_escaped_quotes_in_string() {
+        let tokens =
+            tokenize("CREATE user SET name = 'O''Reilly', sig = 'fn f<''a>(x: &''a str)'").unwrap();
+        assert_eq!(tokens[5], Token::StringLit("O'Reilly".into()));
+        assert_eq!(tokens[9], Token::StringLit("fn f<'a>(x: &'a str)".into()));
+
+        // Empty string and single escaped quote
+        let empty = tokenize("''").unwrap();
+        assert_eq!(empty, vec![Token::StringLit(String::new())]);
+
+        let single = tokenize("''''").unwrap();
+        assert_eq!(single, vec![Token::StringLit("'".into())]);
+
+        // Rust char literal with backslash and comma
+        let rust_chars =
+            tokenize("CREATE ast_node SET source_text = 'let a = ''\\\\''; let b = '','';'")
+                .unwrap();
+        assert_eq!(
+            rust_chars[5],
+            Token::StringLit("let a = '\\\\'; let b = ',';".into())
+        );
+
+        // Double-quoted doubled-quote escaping
+        let dbl = tokenize(r#"CREATE user SET name = "say ""hi""""#).unwrap();
+        assert_eq!(dbl[5], Token::StringLit(r#"say "hi""#.into()));
     }
 
     #[test]

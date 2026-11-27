@@ -1,7 +1,6 @@
 //! redb-backed implementation of the [`KvStore`] trait.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 
@@ -15,11 +14,14 @@ const DATA: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("dllb_data"
 
 /// A KV store backed by redb.
 ///
-/// Holds an `Arc<Database>` so it can be cheaply cloned for read access
-/// while the `StorageWriter` actor holds the canonical write path.
-#[derive(Clone)]
+/// The `Database` is owned directly rather than behind an `Arc`: redb's
+/// `compact` requires `&mut Database`, and wrapping it in an `Arc` would make
+/// compaction permanently unreachable (`Arc::get_mut` can never succeed once
+/// the handle has been cloned for readers). The `Mutex` provides the `&mut`
+/// borrow for the rare compaction call while leaving every read and write path
+/// on `&self`.
 pub struct RedbBackend {
-    db: Arc<Database>,
+    db: std::sync::Mutex<Database>,
 }
 
 impl RedbBackend {
@@ -48,30 +50,34 @@ impl RedbBackend {
         drop(_table);
         txn.commit().map_err(map_err)?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: std::sync::Mutex::new(db),
+        })
     }
 
-    /// Get a shared handle to the underlying redb `Database`.
+    /// Borrow the database for a read/write transaction.
     ///
-    /// Callers can use this for direct read transactions, bypassing
-    /// the actor mailbox for zero-overhead reads.
-    pub fn db_handle(&self) -> Arc<Database> {
-        Arc::clone(&self.db)
+    /// The lock is held only for the duration of the transaction, which is
+    /// what redb itself serializes on anyway.
+    fn db(&self) -> Result<std::sync::MutexGuard<'_, Database>> {
+        self.db
+            .lock()
+            .map_err(|_| Error::Storage("database lock poisoned".into()))
     }
 
     /// Compact the underlying redb database to reclaim free space.
+    ///
+    /// Returns `true` when space was actually reclaimed.
     pub fn compact(&self) -> Result<bool> {
-        if let Some(db) = Arc::get_mut(&mut self.db.clone()) {
-            db.compact().map_err(map_err)
-        } else {
-            Ok(false)
-        }
+        let mut db = self.db()?;
+        db.compact().map_err(map_err)
     }
 }
 
 impl KvStore for RedbBackend {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(DATA).map_err(map_err)?;
         let result: Option<redb::AccessGuard<'_, &[u8]>> = table.get(key).map_err(map_err)?;
         match result {
@@ -81,7 +87,8 @@ impl KvStore for RedbBackend {
     }
 
     fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(DATA).map_err(map_err)?;
             table.insert(key, value).map_err(map_err)?;
@@ -91,7 +98,8 @@ impl KvStore for RedbBackend {
     }
 
     fn delete(&self, key: &[u8]) -> Result<()> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(DATA).map_err(map_err)?;
             table.remove(key).map_err(map_err)?;
@@ -101,7 +109,8 @@ impl KvStore for RedbBackend {
     }
 
     fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(DATA).map_err(map_err)?;
         let range: redb::Range<'_, &[u8], &[u8]> = table.range(start..end).map_err(map_err)?;
         let mut results = Vec::new();
@@ -113,7 +122,8 @@ impl KvStore for RedbBackend {
     }
 
     fn put_batch(&self, ops: &[(&[u8], &[u8])]) -> Result<()> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(DATA).map_err(map_err)?;
             for &(key, value) in ops {
@@ -125,7 +135,8 @@ impl KvStore for RedbBackend {
     }
 
     fn delete_batch(&self, keys: &[&[u8]]) -> Result<()> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(DATA).map_err(map_err)?;
             for &key in keys {
@@ -137,7 +148,8 @@ impl KvStore for RedbBackend {
     }
 
     fn write_batch(&self, puts: &[(&[u8], &[u8])], deletes: &[&[u8]]) -> Result<()> {
-        let txn = self.db.begin_write().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_write().map_err(map_err)?;
         {
             let mut table = txn.open_table(DATA).map_err(map_err)?;
             for &key in deletes {
@@ -153,7 +165,8 @@ impl KvStore for RedbBackend {
 
     fn count_prefix(&self, prefix: &[u8]) -> Result<usize> {
         let end = crate::key::prefix_end(prefix);
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(DATA).map_err(map_err)?;
         let range: redb::Range<'_, &[u8], &[u8]> =
             table.range(prefix..end.as_slice()).map_err(map_err)?;
@@ -168,7 +181,8 @@ impl KvStore for RedbBackend {
 
     fn scan_prefix_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
         let end = crate::key::prefix_end(prefix);
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(DATA).map_err(map_err)?;
         let range: redb::Range<'_, &[u8], &[u8]> =
             table.range(prefix..end.as_slice()).map_err(map_err)?;
@@ -183,7 +197,8 @@ impl KvStore for RedbBackend {
     fn multi_get(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
         // Share a single read transaction (one MVCC snapshot) across all
         // lookups instead of opening one per key.
-        let txn = self.db.begin_read().map_err(map_err)?;
+        let db = self.db()?;
+        let txn = db.begin_read().map_err(map_err)?;
         let table = txn.open_table(DATA).map_err(map_err)?;
         let mut out = Vec::with_capacity(keys.len());
         for &key in keys {

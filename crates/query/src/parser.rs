@@ -426,21 +426,43 @@ fn parse_traversal_chain(tokens: &[Token], pos: &mut usize) -> Result<TraversalC
 
 // -----------------------------------------------------------------------
 // DELETE table:id
+// DELETE table WHERE clause
+// DELETE ALL FROM table
 // -----------------------------------------------------------------------
 
 fn parse_delete(tokens: &[Token], pos: &mut usize) -> Result<Statement> {
     expect(tokens, pos, &Token::Delete)?;
+
+    // `DELETE ALL FROM <table>` is the only form that removes every row.
+    // Requiring it explicitly keeps a missing `WHERE` from silently wiping a
+    // table: `DELETE user;` is almost always a typo, `DELETE user WHERE age >
+    // 90;` is not.
+    if consume_keyword(tokens, pos, "ALL") {
+        expect(tokens, pos, &Token::From)?;
+        let table = expect_ident(tokens, pos)?;
+        return Ok(Statement::DeleteWhere {
+            table,
+            filter: None,
+        });
+    }
+
     let table = expect_ident(tokens, pos)?;
-    // `DELETE table:id` is a point delete; `DELETE table [WHERE ...]` deletes
+
+    // `DELETE table:id` is a point delete; `DELETE table WHERE ...` deletes
     // every matching row.
     if matches!(tokens.get(*pos), Some(Token::Colon)) {
         *pos += 1;
         let id = expect_ident(tokens, pos)?;
-        Ok(Statement::Delete { table, id })
-    } else {
-        let filter = parse_where_clause(tokens, pos)?;
-        Ok(Statement::DeleteWhere { table, filter })
+        return Ok(Statement::Delete { table, id });
     }
+
+    let filter = parse_where_clause(tokens, pos)?;
+    if filter.is_none() {
+        return Err(Error::Query(format!(
+            "DELETE '{table}' requires a WHERE clause; use DELETE ALL FROM {table} to remove every row"
+        )));
+    }
+    Ok(Statement::DeleteWhere { table, filter })
 }
 
 // -----------------------------------------------------------------------
@@ -1897,11 +1919,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_delete_all_no_filter() {
+    fn parse_delete_all_requires_explicit_all_from() {
+        // The only filterless form is the explicit `DELETE ALL FROM`.
         assert!(matches!(
-            stmt("DELETE node"),
-            Statement::DeleteWhere { filter: None, .. }
+            stmt("DELETE ALL FROM node"),
+            Statement::DeleteWhere {
+                filter: None,
+                table,
+            } if table == "node"
         ));
+    }
+
+    #[test]
+    fn parse_delete_without_where_is_rejected() {
+        // A bare `DELETE node` must not silently wipe the table.
+        let err = parse("DELETE node").unwrap_err().to_string();
+        assert!(err.contains("requires a WHERE clause"), "{err}");
+        assert!(err.contains("DELETE ALL FROM node"), "{err}");
+        // The point form is still unaffected.
+        assert!(matches!(stmt("DELETE node:abc"), Statement::Delete { .. }));
     }
 
     #[test]

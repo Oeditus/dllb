@@ -26,11 +26,9 @@
 //! will see the new version, miss the cache, and recompute. Results are
 //! never served that were computed from data older than their stated version.
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 
@@ -39,58 +37,14 @@ use crate::ast::OutcomeFormat;
 // ---------------------------------------------------------------------------
 // WriteVersions
 // ---------------------------------------------------------------------------
+//
+// The counters live in `dllb-graph` because `EdgeStore` is the only code that
+// mutates edges: bumping there means no caller -- the query engine, the
+// server, or an embedder driving `EdgeStore` directly -- can forget to
+// invalidate a cached analytics result. Re-exported here so existing
+// `dllb_query::WriteVersions` call sites keep working.
 
-type TableKey = (String, String, String); // (ns, db, table)
-
-/// Per-`(ns, db, table)` monotonic write counter.
-///
-/// Incremented on every edge mutation; read before and after analytics
-/// computations to determine cache validity.
-#[derive(Default)]
-pub struct WriteVersions {
-    map: RwLock<HashMap<TableKey, Arc<AtomicU64>>>,
-}
-
-impl WriteVersions {
-    /// Current version for the given table. Returns `0` if the table has
-    /// never been written to.
-    pub fn current(&self, ns: &str, db: &str, table: &str) -> u64 {
-        let key = table_key(ns, db, table);
-        self.map
-            .read()
-            .unwrap()
-            .get(&key)
-            .map(|c| c.load(Ordering::Acquire))
-            .unwrap_or(0)
-    }
-
-    /// Increment the write counter for `table` by 1.
-    pub fn bump(&self, ns: &str, db: &str, table: &str) {
-        let key = table_key(ns, db, table);
-
-        // Fast path: the counter already exists — bump without a write lock.
-        {
-            let guard = self.map.read().unwrap();
-            if let Some(counter) = guard.get(&key) {
-                counter.fetch_add(1, Ordering::Release);
-                return;
-            }
-        }
-
-        // Slow path: first write to this table — insert a new counter.
-        let mut guard = self.map.write().unwrap();
-        // Double-checked: another task may have inserted while we waited for
-        // the write lock.
-        guard
-            .entry(key)
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .fetch_add(1, Ordering::Release);
-    }
-}
-
-fn table_key(ns: &str, db: &str, table: &str) -> TableKey {
-    (ns.into(), db.into(), table.into())
-}
+pub use dllb_graph::{WriteVersions, global_write_versions};
 
 // ---------------------------------------------------------------------------
 // CacheKind
@@ -204,8 +158,9 @@ impl Hash for CacheKey {
 
 struct CacheEntry {
     /// Pre-formatted wire-ready response string (already in the requested
-    /// `OutcomeFormat`).
-    payload: String,
+    /// `OutcomeFormat`). Held behind an `Arc` so a cache hit clones a pointer
+    /// instead of the payload while the cache mutex is held.
+    payload: Arc<str>,
     /// Write version of the source table at the time of computation.
     version: u64,
     /// Total estimated byte size of this entry (payload string + key overhead).
@@ -281,7 +236,11 @@ impl ComputeCache {
         if let Some(entry) = guard.lru.get(key)
             && entry.version == current_version
         {
-            return Some(entry.payload.clone());
+            // Cloning the `Arc<str>` is O(1); the payload bytes are copied
+            // outside the lock by the caller's `String::from`.
+            let payload = Arc::clone(&entry.payload);
+            drop(guard);
+            return Some(payload.as_ref().to_string());
         }
         None
     }
@@ -314,7 +273,7 @@ impl ComputeCache {
         guard.lru.put(
             key,
             CacheEntry {
-                payload,
+                payload: Arc::from(payload),
                 version,
                 bytes: entry_bytes,
             },
@@ -338,6 +297,10 @@ impl ComputeCache {
 }
 
 /// Helper to parse human string like "1G", "512M", "100K", or raw numeric bytes.
+///
+/// Returns `None` for unparseable input and for values that would overflow
+/// `usize`, so a typo in `DLLB_CACHE_MAX_BYTES` falls back to the default
+/// instead of silently wrapping to a tiny budget.
 fn parse_bytes_str(s: &str) -> Option<usize> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -350,12 +313,13 @@ fn parse_bytes_str(s: &str) -> Option<usize> {
 
     let (num_part, unit) = trimmed.split_at(trimmed.len() - 1);
     let num: usize = num_part.trim().parse().ok()?;
-    match unit.to_uppercase().as_str() {
-        "G" => Some(num * 1024 * 1024 * 1024),
-        "M" => Some(num * 1024 * 1024),
-        "K" => Some(num * 1024),
-        _ => None,
-    }
+    let multiplier = match unit.to_uppercase().as_str() {
+        "G" => 1024 * 1024 * 1024,
+        "M" => 1024 * 1024,
+        "K" => 1024,
+        _ => return None,
+    };
+    num.checked_mul(multiplier)
 }
 
 // ---------------------------------------------------------------------------
@@ -657,5 +621,34 @@ mod tests {
         assert_eq!(parse_bytes_str("512M"), Some(512 * 1024 * 1024));
         assert_eq!(parse_bytes_str("100K"), Some(100 * 1024));
         assert_eq!(parse_bytes_str("1048576"), Some(1048576));
+    }
+
+    #[test]
+    fn parse_bytes_str_rejects_overflow_instead_of_wrapping() {
+        // A typo must fall back to the default, not wrap to a tiny budget
+        // that makes the cache evict on every insert.
+        assert_eq!(parse_bytes_str("99999999999999999999G"), None);
+        assert_eq!(parse_bytes_str("18446744073709551615K"), None);
+    }
+
+    #[test]
+    fn parse_bytes_str_rejects_garbage() {
+        assert_eq!(parse_bytes_str(""), None);
+        assert_eq!(parse_bytes_str("abc"), None);
+        assert_eq!(parse_bytes_str("12X"), None);
+        assert_eq!(parse_bytes_str("-5"), None);
+    }
+
+    #[test]
+    fn cache_get_returns_independent_payloads() {
+        // The payload is shared as an `Arc<str>` internally; callers must
+        // still receive their own owned copy.
+        let c = ComputeCache::default();
+        let k = key("");
+        c.insert(k.clone(), "payload".into(), 1);
+        let first = c.get(&k, 1).unwrap();
+        let second = c.get(&k, 1).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first, "payload");
     }
 }

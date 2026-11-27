@@ -20,7 +20,7 @@ pub mod search;
 pub mod tokenizer;
 
 pub use ast::{OutcomeFormat, Query};
-pub use cache::{ComputeCache, WriteVersions};
+pub use cache::{ComputeCache, WriteVersions, global_write_versions};
 pub use executor::{QueryExecutor, QueryResult};
 pub use format::{format_error, format_result};
 pub use parser::parse;

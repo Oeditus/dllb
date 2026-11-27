@@ -2,6 +2,16 @@
 /target/
 /dist/
 **/*.rs.bk
+# Stray object files that escape /target/ (e.g. from a misdirected codegen)
+*.o
+*.rcgu.o
+*.rlib
+*.rmeta
+
+# Tool-local state
+.ragex/
+.yoke/
+index.scip
 
 # Cargo lock for libraries (keep for binaries -- this workspace has both)
 # Cargo.lock is committed intentionally

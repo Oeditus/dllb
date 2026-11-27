@@ -5,6 +5,7 @@
 //! outgoing entry; the reverse entry's value is empty.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use dllb_core::{Error, Result, Value};
 use dllb_storage::db::DllbStorage;
@@ -12,12 +13,92 @@ use dllb_storage::key;
 
 use crate::edge::Edge;
 
+// ---------------------------------------------------------------------------
+// Write-version registry
+// ---------------------------------------------------------------------------
+//
+// Analytics results (`GRAPH COMMUNITIES`, `PAGERANK`, `CENTRALITY`,
+// `COMPONENTS`) are cached and invalidated by comparing a per-edge-table
+// monotonic counter. Bumping that counter here -- inside the only code that
+// can mutate edges -- means no caller can forget to invalidate, including
+// embedders that drive `EdgeStore` directly rather than through the query
+// engine.
+
+type TableKey = (String, String, String); // (ns, db, table)
+
+/// Process-wide registry of per-edge-table write counters.
+pub struct WriteVersions {
+    map: RwLock<std::collections::HashMap<TableKey, Arc<std::sync::atomic::AtomicU64>>>,
+}
+
+impl Default for WriteVersions {
+    fn default() -> Self {
+        Self {
+            map: RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl WriteVersions {
+    /// Current version for the given table. Returns `0` if the table has
+    /// never been written to.
+    pub fn current(&self, ns: &str, db: &str, table: &str) -> u64 {
+        let key = table_key(ns, db, table);
+        self.map
+            .read()
+            .unwrap()
+            .get(&key)
+            .map(|c| c.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(0)
+    }
+
+    /// Increment the write counter for `table` by 1.
+    pub fn bump(&self, ns: &str, db: &str, table: &str) {
+        let key = table_key(ns, db, table);
+
+        // Fast path: the counter already exists -- bump without a write lock.
+        {
+            let guard = self.map.read().unwrap();
+            if let Some(counter) = guard.get(&key) {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Release);
+                return;
+            }
+        }
+
+        // Slow path: first write to this table -- insert a new counter.
+        let mut guard = self.map.write().unwrap();
+        // Double-checked: another task may have inserted while we waited for
+        // the write lock.
+        guard
+            .entry(key)
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicU64::new(0)))
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn table_key(ns: &str, db: &str, table: &str) -> TableKey {
+    (ns.into(), db.into(), table.into())
+}
+
+/// The process-wide [`WriteVersions`] instance that `EdgeStore` bumps.
+///
+/// A single global keeps the invariant enforceable without threading a handle
+/// through every call site; the query engine reads the same instance so its
+/// cache entries are invalidated by any writer in the process.
+pub fn global_write_versions() -> Arc<WriteVersions> {
+    static GLOBAL: OnceLock<Arc<WriteVersions>> = OnceLock::new();
+    Arc::clone(GLOBAL.get_or_init(|| Arc::new(WriteVersions::default())))
+}
+
 /// Graph edge store scoped to a namespace/database/table.
 pub struct EdgeStore<'s> {
     pub(crate) storage: &'s DllbStorage,
     pub(crate) ns: String,
     pub(crate) db: String,
     pub(crate) table: String,
+    /// Registry bumped on every successful edge mutation. Defaults to the
+    /// process-wide instance so cache invalidation cannot be skipped.
+    versions: Arc<WriteVersions>,
 }
 
 impl<'s> EdgeStore<'s> {
@@ -28,7 +109,34 @@ impl<'s> EdgeStore<'s> {
             ns: ns.into(),
             db: db.into(),
             table: table.into(),
+            versions: Arc::new(WriteVersions::default()),
         }
+    }
+
+    /// Create an edge store that reports mutations to a shared registry.
+    ///
+    /// Every writer that must invalidate a shared analytics cache (the query
+    /// engine, the server) should use this constructor with
+    /// [`global_write_versions`] so all connections observe the same counters.
+    pub fn with_versions(
+        storage: &'s DllbStorage,
+        ns: &str,
+        db: &str,
+        table: &str,
+        versions: Arc<WriteVersions>,
+    ) -> Self {
+        Self {
+            storage,
+            ns: ns.into(),
+            db: db.into(),
+            table: table.into(),
+            versions,
+        }
+    }
+
+    /// Bump this table's write counter, invalidating cached analytics.
+    fn invalidate(&self) {
+        self.versions.bump(&self.ns, &self.db, &self.table);
     }
 
     /// Create a directed edge (RELATE).
@@ -53,7 +161,9 @@ impl<'s> EdgeStore<'s> {
             &edge.src,
         );
         self.storage
-            .put_batch(&[(&out_key, &props), (&in_key, &[])])
+            .put_batch(&[(&out_key, &props), (&in_key, &[])])?;
+        self.invalidate();
+        Ok(())
     }
 
     /// Like [`relate`](Self::relate), but returns the KV operations without
@@ -107,6 +217,7 @@ impl<'s> EdgeStore<'s> {
                 key::graph_incoming_key(&self.ns, &self.db, &self.table, dst, edge_type, src);
             self.storage
                 .delete_batch(&[out_key.as_slice(), in_key.as_slice()])?;
+            self.invalidate();
         }
         Ok(existed)
     }

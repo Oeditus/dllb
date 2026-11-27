@@ -998,6 +998,174 @@ fn build_two_cluster_graph(storage: &DllbStorage) {
 }
 
 #[test]
+fn edge_mutation_through_edge_store_invalidates_cached_analytics() {
+    // The cache must be invalidated by *any* writer, not just one that goes
+    // through the query executor: `EdgeStore` bumps the shared registry itself.
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = dllb_query::global_write_versions();
+
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+    let (first, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(matches!(first, QueryResult::Components { .. }));
+
+    // Warm cache hit.
+    let (hit, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(matches!(hit, QueryResult::CachedResponse(_)));
+
+    // Mutate an edge directly through the graph crate -- bypassing the
+    // executor entirely. The cached components result must go stale.
+    let store =
+        dllb_graph::EdgeStore::with_versions(&storage, "ns", "db", "calls", Arc::clone(&versions));
+    store
+        .relate(&dllb_graph::Edge::new("x1", "calls", "x2"))
+        .unwrap();
+
+    let (after, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    match after {
+        QueryResult::Components { count, .. } => {
+            // A brand-new disjoint pair adds a component.
+            assert!(count >= 2, "expected a recompute, got {count} components");
+        }
+        other => panic!("expected a recomputed Components result, got {other:?}"),
+    }
+}
+
+#[test]
+fn edge_delete_invalidates_cached_analytics() {
+    let (_dir, storage) = temp_storage();
+    build_two_cluster_graph(&storage);
+
+    let cache = Arc::new(ComputeCache::default());
+    let versions = dllb_query::global_write_versions();
+    let e = exec_with_shared_cache(&storage, Arc::clone(&cache), Arc::clone(&versions));
+
+    let (first, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(matches!(first, QueryResult::Components { .. }));
+
+    let store =
+        dllb_graph::EdgeStore::with_versions(&storage, "ns", "db", "calls", Arc::clone(&versions));
+    assert!(store.delete("a1", "calls", "b1").unwrap());
+
+    let (after, _) = e.run("GRAPH COMPONENTS calls").unwrap();
+    assert!(
+        matches!(after, QueryResult::Components { .. }),
+        "deleting an edge must invalidate the components cache"
+    );
+}
+
+#[test]
+fn compact_reports_whether_space_was_reclaimed() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE doc:a SET body = 'x';").unwrap();
+    e.run("DELETE doc:a;").unwrap();
+
+    let (result, _) = e.run("COMPACT").unwrap();
+    assert!(
+        matches!(result, QueryResult::Compacted { .. }),
+        "COMPACT must report a reclaimed flag, got {result:?}"
+    );
+}
+
+#[test]
+fn delete_without_where_is_rejected_and_leaves_data_intact() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE n:a SET v = 1;").unwrap();
+    e.run("CREATE n:b SET v = 2;").unwrap();
+
+    // The dangerous form must fail loudly...
+    let err = e.run("DELETE n;").unwrap_err().to_string();
+    assert!(err.contains("requires a WHERE clause"), "{err}");
+
+    // ...and leave every row in place.
+    assert_eq!(count_value(e.run("COUNT n;").unwrap().0), 2);
+
+    // The explicit form still works.
+    let (res, _) = e.run("DELETE ALL FROM n;").unwrap();
+    assert!(matches!(res, QueryResult::DeletedMany { count: 2 }));
+    assert_eq!(count_value(e.run("COUNT n;").unwrap().0), 0);
+}
+
+#[test]
+fn delete_where_removes_all_matching_rows_in_one_pass() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("DEFINE INDEX by_file ON n FIELDS file;").unwrap();
+    for i in 0..10 {
+        e.run(&format!("CREATE n:row{i} SET file = 'x.rs';"))
+            .unwrap();
+    }
+    e.run("CREATE n:keep SET file = 'y.rs';").unwrap();
+
+    let (res, _) = e.run("DELETE n WHERE file = 'x.rs';").unwrap();
+    assert!(matches!(res, QueryResult::DeletedMany { count: 10 }));
+    assert_eq!(count_value(e.run("COUNT n;").unwrap().0), 1);
+    // Index entries went with the documents.
+    assert_eq!(
+        count_value(e.run("COUNT n WHERE file = 'x.rs';").unwrap().0),
+        0
+    );
+}
+
+#[test]
+fn graph_path_not_found_has_no_sentinel_length() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("RELATE fn:a->calls->fn:b;").unwrap();
+
+    let rows = rows_of(e.run("GRAPH PATH b -> a ON calls;").unwrap().0);
+    assert_eq!(rows[0].get("found"), Some(&Value::Bool(false)));
+    // Not `-1`: an absent path has no length at all.
+    assert_eq!(rows[0].get("length"), Some(&Value::None));
+    assert_eq!(rows[0].get("path"), Some(&Value::None));
+}
+
+#[test]
+fn traversal_select_rejects_order_by() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE user:alice SET name = 'Alice';").unwrap();
+    e.run("CREATE user:bob SET name = 'Bob';").unwrap();
+    e.run("RELATE user:alice->knows->user:bob;").unwrap();
+
+    // Silently ignoring ORDER BY would return unsorted rows with a success
+    // status; the clause must be rejected instead.
+    let err = e
+        .run("SELECT ->knows->user FROM user:alice ORDER BY name;")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ORDER BY is not supported"), "{err}");
+
+    // Without ORDER BY the traversal still works.
+    let rows = rows_of(e.run("SELECT ->knows->user FROM user:alice;").unwrap().0);
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn select_literal_columns_do_not_collide() {
+    let (_dir, storage) = temp_storage();
+    let e = exec(&storage);
+    e.run("CREATE user:a SET name = 'Alice';").unwrap();
+
+    // Two distinct string literals must occupy two distinct columns, and the
+    // column name must survive a quote inside the literal.
+    let rows = rows_of(e.run("SELECT 'x', 'y' FROM user:a;").unwrap().0);
+    assert_eq!(rows[0].get("'x'"), Some(&Value::String("x".into())));
+    assert_eq!(rows[0].get("'y'"), Some(&Value::String("y".into())));
+
+    let rows = rows_of(e.run("SELECT 'it''s' FROM user:a;").unwrap().0);
+    assert_eq!(
+        rows[0].get("'it''s'"),
+        Some(&Value::String("it's".into())),
+        "column name must escape the embedded quote"
+    );
+}
+
+#[test]
 fn communities_first_call_returns_communities_result() {
     let (_dir, storage) = temp_storage();
     build_two_cluster_graph(&storage);

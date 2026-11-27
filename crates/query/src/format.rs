@@ -41,10 +41,12 @@ fn format_result_json(result: &QueryResult) -> String {
         QueryResult::CachedResponse(s) => s.clone(),
         QueryResult::Ok => r#"{"status":"ok"}"#.to_string(),
         QueryResult::Created { id } => {
-            format!(r#"{{"status":"created","id":"{}"}}"#, id)
+            let id_json = serde_json::to_string(&id.to_string()).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"{{"status":"created","id":{id_json}}}"#)
         }
         QueryResult::Updated { id } => {
-            format!(r#"{{"status":"updated","id":"{}"}}"#, id)
+            let id_json = serde_json::to_string(&id.to_string()).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"{{"status":"updated","id":{id_json}}}"#)
         }
         QueryResult::Deleted { existed } => {
             format!(r#"{{"status":"deleted","existed":{existed}}}"#)
@@ -69,9 +71,10 @@ fn format_result_json(result: &QueryResult) -> String {
             )
         }
         QueryResult::Communities { algorithm, groups } => {
+            let alg_json = serde_json::to_string(algorithm).unwrap_or_else(|_| "\"\"".into());
             let json_groups = serde_json::to_string(groups).unwrap_or_else(|_| "[]".into());
             format!(
-                r#"{{"status":"communities","algorithm":"{algorithm}","community_count":{},"data":{json_groups}}}"#,
+                r#"{{"status":"communities","algorithm":{alg_json},"community_count":{},"data":{json_groups}}}"#,
                 groups.len()
             )
         }
@@ -90,12 +93,15 @@ fn format_result_json(result: &QueryResult) -> String {
                 r#"{{"status":"components","component_count":{count},"largest":{largest},"nodes":{nodes}}}"#
             )
         }
+        QueryResult::Compacted { reclaimed } => {
+            format!(r#"{{"status":"compacted","reclaimed":{reclaimed}}}"#)
+        }
     }
 }
 
 fn format_error_json(err: &dllb_core::Error) -> String {
-    let msg = err.to_string().replace('"', "\\\"");
-    format!(r#"{{"status":"error","message":"{msg}"}}"#)
+    let msg_json = serde_json::to_string(&err.to_string()).unwrap_or_else(|_| "\"error\"".into());
+    format!(r#"{{"status":"error","message":{msg_json}}}"#)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +168,9 @@ fn format_result_toon(result: &QueryResult) -> String {
             format!(
                 "status = \"components\"\ncomponent_count = {count}\nlargest = {largest}\nnodes = {nodes}"
             )
+        }
+        QueryResult::Compacted { reclaimed } => {
+            format!("status = \"compacted\"\nreclaimed = {reclaimed}")
         }
     }
 }
@@ -237,6 +246,9 @@ fn format_result_csv(result: &QueryResult) -> String {
         } => {
             format!("status,component_count,largest,nodes\ncomponents,{count},{largest},{nodes}")
         }
+        QueryResult::Compacted { reclaimed } => {
+            format!("status,reclaimed\ncompacted,{reclaimed}")
+        }
     }
 }
 
@@ -301,5 +313,118 @@ fn csv_escape(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_error_json_escapes_backslashes_quotes_and_newlines() {
+        let err = dllb_core::Error::Query(
+            "unexpected character: '\\', near \"foo\", line1\nline2\t\x00".into(),
+        );
+        let json = format_error(&err, OutcomeFormat::Json);
+        // Must be single-line valid JSON
+        assert!(!json.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["message"], err.to_string());
+    }
+
+    // -- Compacted ----------------------------------------------------------
+
+    #[test]
+    fn compacted_renders_in_every_format() {
+        let yes = QueryResult::Compacted { reclaimed: true };
+        assert_eq!(
+            format_result(&yes, OutcomeFormat::Json),
+            r#"{"status":"compacted","reclaimed":true}"#
+        );
+        assert_eq!(
+            format_result(&yes, OutcomeFormat::Toon),
+            "status = \"compacted\"\nreclaimed = true"
+        );
+        assert_eq!(
+            format_result(&yes, OutcomeFormat::Csv),
+            "status,reclaimed\ncompacted,true"
+        );
+
+        let no = QueryResult::Compacted { reclaimed: false };
+        assert_eq!(
+            format_result(&no, OutcomeFormat::Json),
+            r#"{"status":"compacted","reclaimed":false}"#
+        );
+    }
+
+    // -- JSON round-trip for ids containing quotes --------------------------
+
+    #[test]
+    fn created_id_with_quote_stays_valid_json() {
+        let result = QueryResult::Created {
+            id: dllb_core::RecordId::new("user", "o'brien"),
+        };
+        let json = format_result(&result, OutcomeFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["id"], "user:o'brien");
+    }
+
+    // -- TOON ---------------------------------------------------------------
+
+    #[test]
+    fn toon_escapes_quotes_and_backslashes_in_strings() {
+        assert_eq!(
+            toon_value(&Value::String(r#"a"b\c"#.into())),
+            r#""a\"b\\c""#
+        );
+    }
+
+    #[test]
+    fn toon_rows_emit_one_table_per_row() {
+        let mut row = BTreeMap::new();
+        row.insert("name".to_string(), Value::String("Alice".into()));
+        let out = format_result(&QueryResult::Rows(vec![row]), OutcomeFormat::Toon);
+        assert!(out.starts_with("status = \"rows\"\ncount = 1"));
+        assert!(out.contains("[[data]]"));
+        assert!(out.contains("name = \"Alice\""));
+    }
+
+    // -- CSV ----------------------------------------------------------------
+
+    #[test]
+    fn csv_escapes_commas_quotes_and_newlines() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_escape("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn csv_rows_union_columns_across_heterogeneous_rows() {
+        let mut first = BTreeMap::new();
+        first.insert("a".to_string(), Value::Int(1));
+        let mut second = BTreeMap::new();
+        second.insert("b".to_string(), Value::Int(2));
+
+        let out = format_result(&QueryResult::Rows(vec![first, second]), OutcomeFormat::Csv);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "a,b");
+        // Missing cells stay empty rather than shifting columns.
+        assert_eq!(lines[1], "1,");
+        assert_eq!(lines[2], ",2");
+    }
+
+    #[test]
+    fn csv_empty_rows_reports_zero_count() {
+        let out = format_result(&QueryResult::Rows(vec![]), OutcomeFormat::Csv);
+        assert_eq!(out, "status,count\nrows,0");
+    }
+
+    #[test]
+    fn csv_object_value_is_rendered_as_a_placeholder() {
+        // A nested object has no flat CSV representation; the placeholder must
+        // be stable so downstream parsers can recognise it.
+        assert_eq!(csv_value(&Value::Object(BTreeMap::new())), "<object>");
     }
 }

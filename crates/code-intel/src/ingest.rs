@@ -51,14 +51,35 @@ pub struct IngestStats {
     pub edges: usize,
 }
 
+/// Encode a file path into a form usable inside a record id.
+///
+/// Record ids are emitted into query-language source (`CREATE ast_node:{id}`),
+/// where the tokenizer accepts only ASCII alphanumerics, `_`, and the
+/// separators the statement grammar itself uses. A raw path like
+/// `lib/my app.ex` would tokenize as several tokens and the generated batch
+/// would fail to parse, so every character outside `[A-Za-z0-9_.-]` is
+/// percent-encoded. The mapping is deterministic and injective, so ids stay
+/// stable across runs and distinct paths never collide.
+fn encode_path(file_path: &str) -> String {
+    let mut out = String::with_capacity(file_path.len());
+    for b in file_path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Generate a deterministic ID for a container node.
 fn container_id(file_path: &str, kind: &str, name: &str) -> String {
-    format!("{}::{}::{}", file_path, kind, name)
+    format!("{}::{}::{}", encode_path(file_path), kind, name)
 }
 
 /// Generate a deterministic ID for a function node.
 fn function_id(file_path: &str, name: &str, arity: usize) -> String {
-    format!("{}::{}/{}", file_path, name, arity)
+    format!("{}::{}/{}", encode_path(file_path), name, arity)
 }
 
 /// Generate a deterministic ID for an import target.
@@ -312,6 +333,10 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
 /// - `CREATE ast_node:{id} SET ...` for each document
 /// - `RELATE ast_node:{from} -> {edge_type} -> ast_node:{to}` for each edge
 /// - `END BATCH` trailer
+///
+/// Record ids and edge types are emitted verbatim, so they must be valid
+/// query-language identifiers. [`prepare_batch`] guarantees this by encoding
+/// the `file_path` that seeds every id (see [`encode_path`]).
 pub fn generate_dllb_queries(batch: &IngestBatch) -> Vec<String> {
     let mut queries = Vec::new();
 
@@ -345,7 +370,7 @@ pub fn generate_dllb_queries(batch: &IngestBatch) -> Vec<String> {
 
         queries.push(format!(
             "CREATE ast_node:{} SET {}",
-            escape_str(&doc.id),
+            doc.id,
             sets.join(", ")
         ));
     }
@@ -353,9 +378,7 @@ pub fn generate_dllb_queries(batch: &IngestBatch) -> Vec<String> {
     for edge in &batch.edges {
         queries.push(format!(
             "RELATE ast_node:{} -> {} -> ast_node:{}",
-            escape_str(&edge.from_id),
-            edge.edge_type,
-            escape_str(&edge.to_id)
+            edge.from_id, edge.edge_type, edge.to_id
         ));
     }
 
@@ -498,17 +521,17 @@ mod tests {
         // First document is the container
         assert_eq!(batch.documents[0].name, "MyApp");
         assert_eq!(batch.documents[0].kind, "module");
-        assert_eq!(batch.documents[0].id, "lib/my_app.ex::module::MyApp");
+        assert_eq!(batch.documents[0].id, "lib%2Fmy_app.ex::module::MyApp");
 
         // Second document is the 'add' function
         assert_eq!(batch.documents[1].name, "add");
         assert_eq!(batch.documents[1].kind, "function_def");
-        assert_eq!(batch.documents[1].id, "lib/my_app.ex::add/2");
+        assert_eq!(batch.documents[1].id, "lib%2Fmy_app.ex::add/2");
 
         // Third document is the 'greet' function
         assert_eq!(batch.documents[2].name, "greet");
         assert_eq!(batch.documents[2].kind, "function_def");
-        assert_eq!(batch.documents[2].id, "lib/my_app.ex::greet/1");
+        assert_eq!(batch.documents[2].id, "lib%2Fmy_app.ex::greet/1");
 
         // Check edges: 2 containment + 1 import + 1 call = 4
         assert_eq!(batch.edges.len(), 4);
@@ -537,7 +560,7 @@ mod tests {
             .filter(|e| e.edge_type == "calls")
             .collect();
         assert_eq!(call_edges.len(), 1);
-        assert_eq!(call_edges[0].from_id, "lib/my_app.ex::greet/1");
+        assert_eq!(call_edges[0].from_id, "lib%2Fmy_app.ex::greet/1");
         assert_eq!(call_edges[0].to_id, "call_target::IO.puts");
 
         // Stats
@@ -715,7 +738,47 @@ mod tests {
             .filter(|e| e.edge_type == "calls")
             .collect();
         assert_eq!(call_edges.len(), 1);
-        assert_eq!(call_edges[0].from_id, "lib/local_call_app.ex::caller/0");
-        assert_eq!(call_edges[0].to_id, "lib/local_call_app.ex::callee/0"); // Resolved locally!
+        assert_eq!(call_edges[0].from_id, "lib%2Flocal_call_app.ex::caller/0");
+        assert_eq!(call_edges[0].to_id, "lib%2Flocal_call_app.ex::callee/0"); // Resolved locally!
+    }
+
+    #[test]
+    fn encode_path_is_injective_and_identifier_safe() {
+        // Every byte outside [A-Za-z0-9_.-] is percent-encoded, so the result
+        // is always a valid query-language identifier.
+        let encoded = encode_path("lib/my app.ex");
+        assert_eq!(encoded, "lib%2Fmy%20app.ex");
+        assert!(
+            encoded
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'%'))
+        );
+
+        // Distinct paths never collide.
+        assert_ne!(encode_path("a/b"), encode_path("a.b"));
+        assert_ne!(encode_path("a b"), encode_path("a%20b"));
+        // A path that already contains the escape character still differs.
+        assert_ne!(encode_path("a%2Fb"), encode_path("a/b"));
+    }
+
+    #[test]
+    fn generated_ids_are_accepted_by_the_query_tokenizer() {
+        // The whole point of `encode_path` is that the generated batch parses.
+        // The query tokenizer accepts an identifier as a run of ASCII
+        // alphanumerics and `_` (see `dllb_query::tokenizer`), so every id
+        // must be composed only of those plus the statement separators the
+        // grammar itself uses (`:`, `/`, `%`).
+        let tree = sample_tree();
+        let batch = prepare_batch(&tree, "some/dir with space/app.ex", "elixir");
+        for doc in &batch.documents {
+            assert!(
+                doc.id.bytes().all(|b| b.is_ascii_alphanumeric()
+                    || matches!(b, b'_' | b':' | b'/' | b'%' | b'.' | b'-')),
+                "generated id {:?} contains a character the tokenizer rejects",
+                doc.id
+            );
+            // No whitespace: a space would split the id into two tokens.
+            assert!(!doc.id.contains(char::is_whitespace), "{:?}", doc.id);
+        }
     }
 }

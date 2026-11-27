@@ -564,9 +564,9 @@ name = "dllb-server"
 version = "1.1.0"
 dependencies = [
  "dllb-core",
+ "dllb-graph",
  "dllb-query",
  "dllb-storage",
- "serde_json",
  "tikv-jemallocator",
  "tokio",
  "tracing",

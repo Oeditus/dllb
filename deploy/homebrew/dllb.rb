@@ -15,5 +15,9 @@ class Dllb < Formula
 
   test do
     assert_match "dllb v#{version}", pipe_output("#{bin}/dllb-cli --no-color --path #{testpath}/test.redb", ".quit\n", 0)
+    # `--version` must actually report the version; the CLI exits without
+    # starting the REPL when it is passed.
+    assert_match "dllb-cli", shell_output("#{bin}/dllb-cli --version")
+    assert_match version.to_s, shell_output("#{bin}/dllb-cli --version")
   end
 end

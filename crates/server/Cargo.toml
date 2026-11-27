@@ -7,9 +7,9 @@ description = "TCP/WebSocket server for dllb"
 
 [dependencies]
 dllb-core = { workspace = true }
+dllb-graph = { workspace = true }
 dllb-storage = { workspace = true }
 dllb-query = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -5,6 +5,59 @@ All notable changes to `dllb` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-27
+
+### Changed (breaking)
+- `DELETE <table>` without a `WHERE` clause is now a parse error. The only
+  filterless form is the explicit `DELETE ALL FROM <table>`. Previously a
+  missing `WHERE` silently deleted every row in the table.
+- `QueryResult::Compacted { reclaimed }` replaces the bare `Ok` returned by
+  `COMPACT`, so callers can tell whether space was actually reclaimed.
+- `GRAPH PATH` reports `length` and `path` as `NONE` when no path exists,
+  instead of the `-1` / `[]` sentinels.
+- `ORDER BY` on a graph-traversal `SELECT` is rejected rather than silently
+  ignored.
+- `SELECT` column names for string literals now escape embedded quotes
+  (`'it''s'`), so distinct literals never collapse onto one column.
+- Record ids produced by `dllb-code-intel` ingestion percent-encode the
+  `file_path` (`lib/my_app.ex` becomes `lib%2Fmy_app.ex`), so generated
+  batches always parse. Previously any path containing a space or other
+  non-identifier byte produced an unparseable `CREATE`.
+
+### Fixed
+- Analytics caches (`GRAPH COMMUNITIES`, `PAGERANK`, `CENTRALITY`,
+  `COMPONENTS`) are now invalidated by *any* edge mutation. `EdgeStore` bumps
+  the shared write-version registry itself, so embedders that bypass the query
+  executor can no longer leave stale results cached.
+- `COMPACT` now actually compacts. The previous implementation called
+  `Arc::get_mut` on a fresh clone, which can never succeed, so it always
+  reported success while reclaiming nothing.
+- `DELETE ... WHERE` applies all deletions in one storage transaction instead
+  of one commit per row.
+- `UPDATE` reads each document once instead of three times.
+- `ComputeCache::get` no longer clones the (potentially large) payload while
+  holding the cache mutex.
+- `DLLB_CACHE_MAX_BYTES` values that would overflow are rejected instead of
+  wrapping to a tiny budget.
+- Vector writes with the wrong dimensionality fail with
+  `DimensionMismatch` instead of silently dropping the document from the index.
+- `dllb-cli` gains `--version`/`-V` and `--help`/`-h`, and rejects unknown
+  arguments instead of silently ignoring them.
+- `install.sh` uses `https://github.com/...` (was `https://github://...`, which
+  could never resolve), fails loudly when no release is found instead of
+  falling back to a stale hard-coded tag, and verifies `SHA256SUMS`.
+- Release tarballs include `LICENSE`, which previously did not exist in the
+  repository despite being declared in every `Cargo.toml`.
+
+### Added
+- `LICENSE` (MIT).
+- `Collection::merge_returning` and `Collection::delete_many`.
+- `dllb_graph::WriteVersions` and `global_write_versions()`, re-exported from
+  `dllb_query`.
+- Unit tests for the executor's pure helpers (`cmp_values`, `order_cmp`,
+  `group_key`, `normalize_scores`, `candidate_pool`, `plan_index_lookup`,
+  `sort_documents`) and for all three output formats.
+
 ## [1.1.0] - 2026-11-18
 
 ### Changed

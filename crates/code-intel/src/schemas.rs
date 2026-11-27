@@ -30,6 +30,12 @@ pub const ALL_EDGE_TYPES: &[&str] = &[
 
 /// Create a schemafull table definition for AST nodes.
 ///
+/// The 13 fields below are exactly the ones [`crate::ingest`] writes (plus the
+/// three optional embedding fields, which the query layer fills in later).
+/// Keep this list and `ingest::generate_dllb_queries` in sync -- schemafull
+/// validation rejects unknown fields, so a divergence makes ingested rows
+/// unwritable.
+///
 /// Fields:
 /// - `name` (String, required) -- node name (function name, class name, etc.)
 /// - `kind` (String, required) -- MetaAST node type atom name
@@ -42,6 +48,8 @@ pub const ALL_EDGE_TYPES: &[&str] = &[
 /// - `docstring` (String) -- documentation string
 /// - `source_embedding` (Vector(768)) -- embedding of source text
 /// - `structure_embedding` (Vector(384)) -- embedding of AST structure
+/// - `docstring_embedding` (Vector(768)) -- embedding of the docstring
+/// - `ast_serialized` (String) -- JSON-serialized MetaAST subtree
 pub fn ast_node_schema() -> TableDefinition {
     TableDefinition {
         name: "ast_node".into(),

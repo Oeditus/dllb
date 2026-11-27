@@ -1,13 +1,11 @@
-//! High-level storage API that ties the redb backend and the
-//! `StorageWriter` actor together.
+//! High-level storage API over the redb backend.
 //!
-//! - Writes go through the actor (serialized, fault-tolerant).
-//! - Reads go directly through redb read transactions (no mailbox overhead).
+//! Reads and writes both go directly through the backend. redb itself
+//! provides MVCC for concurrent readers and a single serialized writer, so no
+//! additional actor layer is needed; callers share one `DllbStorage` by
+//! reference (or behind an `Arc<DllbStorage>` at the process level).
 
 use std::path::Path;
-use std::sync::Arc;
-
-use redb::Database;
 
 use dllb_core::Result;
 
@@ -15,33 +13,22 @@ use crate::backend::RedbBackend;
 use crate::kv::KvStore;
 
 /// The main entry point for dllb storage.
-///
-/// Holds a shared redb backend for direct reads and a reference to the
-/// `StorageWriter` actor for serialized writes.
 pub struct DllbStorage {
-    backend: Arc<RedbBackend>,
+    backend: RedbBackend,
 }
 
 impl DllbStorage {
     /// Open or create a database at the given path.
-    ///
-    /// In the future this will also spawn the `StorageWriter` actor
-    /// into an `ActorSystem`. For now it provides a synchronous API
-    /// suitable for Phase 1 testing.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let backend = RedbBackend::open(path)?;
-        Ok(Self {
-            backend: Arc::new(backend),
-        })
-    }
-
-    /// Get a shared handle to the underlying redb `Database` for
-    /// advanced use cases (e.g., direct read transactions).
-    pub fn db_handle(&self) -> Arc<Database> {
-        self.backend.db_handle()
+        Ok(Self { backend })
     }
 
     /// Compact the underlying database to reclaim free space.
+    ///
+    /// Returns `true` when space was reclaimed. Takes `&self` so a shared
+    /// `DllbStorage` can compact without an exclusive borrow; the backend
+    /// serializes the rewrite internally.
     pub fn compact(&self) -> Result<bool> {
         self.backend.compact()
     }

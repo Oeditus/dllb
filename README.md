@@ -24,7 +24,7 @@
 ### Modern Features (v1.0.0)
 - **Zero-Copy & Zero-Dependency Engine**: Built on pure Rust `redb` for ACID transactions and thread-safe MVCC reads without dynamic C links.
 - **Unified Key Encoding**: Maps document, graph, index, and metadata entries into a single sorted keyspace; scans use highly efficient binary prefix range checks.
-- **Supervised Actor Architecture**: Powered by `joerl` (Erlang/OTP patterns in Rust), ensuring stateful subsystems (storage, indexing) recover automatically from failures.
+- **Crash-Safe Storage**: redb's copy-on-write B-trees give ACID transactions and MVCC snapshots with no external dependencies.
 - **AST & Code Intel Native**: Predefined schemas and a code-aware tokenization pipeline designed for source code analysis.
 - **SQL AST Functions**: Native SQL extensions like `ast::complexity`, `ast::hash`, and `ast::similarity` to perform structural clone and pattern analyses directly inside the database.
 - **Hybrid Search**: Fuses BM25 text relevance and HNSW approximate nearest-neighbor vector similarity with optional server-side metadata constraints.
@@ -58,19 +58,21 @@ stitching together MongoDB, Neo4j, Elasticsearch, and Pinecone. That means six
 connection pools, six consistency models, six failure modes, and ETL pipelines
 to keep them in sync.
 
-dllb eliminates the seams. One query can combine a vector similarity search with
-a graph traversal and a full-text match:
+dllb eliminates the seams. A single statement can fuse a full-text match with a
+vector similarity search, and the same engine answers graph questions over the
+same data:
 
 ```sql
-SELECT id, name,
-    vector::distance::knn() AS vec_score,
-    search::score(1) AS ft_score
-  FROM ast_node
-  WHERE embedding <|20,50|> $query_vec
-  AND source_text @1@ 'async trait'
-  AND ->calls->fn_node.module = 'core'
-  ORDER BY (1.0 - vec_score) * 0.6 + ft_score * 0.4 DESC
-  LIMIT 10;
+-- BM25 + HNSW fused into one ranked list
+HYBRID SEARCH ast_node TEXT source_text 'async trait'
+               VECTOR source_embedding [0.12, -0.03, ...]
+               ALPHA 0.6 WHERE kind = 'function' LIMIT 10;
+
+-- Structural neighbours of a function, then their documents
+SELECT ->calls->fn_node.name FROM ast_node:src%2Fquery.rs::parse/1;
+
+-- Which functions are most depended upon?
+GRAPH CENTRALITY calls INDEGREE LIMIT 20;
 ```
 
 ### Code Intelligence First-Class Citizen
@@ -85,14 +87,17 @@ with a code-aware tokenizer that understands camelCase/snake_case boundaries.
 This enables queries like:
 
 ```sql
--- Find functions similar to this one, called by modules importing 'tokio'
-SELECT id, name, file_path, vector::distance::knn() AS similarity
-  FROM ast_node
-  WHERE kind = 'function'
-  AND source_embedding <|20,100|> $my_fn_embedding
-  AND <-contains<-module<-imports<-module[WHERE name CONTAINS 'tokio']
-  ORDER BY similarity
-  LIMIT 10;
+-- Functions structurally similar to a query embedding
+VECTOR SEARCH ast_node source_embedding [0.1, -0.2, ...] K 10;
+
+-- Structural clone detection inside the database
+SELECT ast::similarity(ast_serialized, '{...}') FROM ast_node WHERE kind = 'function_def';
+
+-- Containers that import a given module, then their contained functions
+SELECT <-contains<-module.name FROM import:tokio;
+
+-- Complexity ranking without leaving the database
+SELECT name, ast::complexity(ast_serialized) FROM ast_node ORDER BY name;
 ```
 
 ## Architecture
@@ -112,9 +117,9 @@ block-beta
     columns 5
     doc["Document"] graph["Graph"] fts["Full-Text"] vec["Vector/HNSW"] ast["AST/Code Intel"]
   end
-  block:actors["Actor System (joerl)"]
+  block:actors["Concurrency"]
     columns 3
-    sup["Supervision Trees"] gen["GenServer"] links["Links & Monitors"]
+    mvcc["redb MVCC"] rw["Readers (lock-free)"] wr["Single writer"]
   end
   txn["Transaction Manager (MVCC)"]
   block:storage["Storage Engine"]
@@ -125,30 +130,24 @@ block-beta
   client --> query --> model --> actors --> txn --> storage
 ```
 
-### Actor-Based Fault Tolerance
+### Concurrency and Durability
 
-The runtime is structured as a [joerl](https://crates.io/crates/joerl)
-supervision tree -- an Erlang/OTP-inspired actor model providing automatic
-crash recovery, isolated failure domains, and structured concurrency:
+Concurrency is delegated to [redb](https://github.com/cberner/redb), which
+provides MVCC snapshots for concurrent readers and a single serialized writer
+per database file. dllb adds no lock of its own on the hot path: reads open a
+read transaction directly, and writes go through `write_batch` so a
+multi-key change (document + its index entries) commits atomically.
 
-```mermaid
-graph TD
-  dllb_sup["dllb_sup<br/><i>OneForAll</i>"] --> storage_sup["storage_sup<br/><i>OneForOne</i>"]
-  dllb_sup --> index_sup["index_sup<br/><i>OneForOne</i>"]
-  dllb_sup --> client_sup["client_sup<br/><i>OneForOne</i>"]
+Analytics results (`GRAPH COMMUNITIES`, `PAGERANK`, `CENTRALITY`,
+`COMPONENTS`) are cached and invalidated by a per-edge-table monotonic counter
+that `EdgeStore` bumps on every mutation — see
+[`crates/graph/src/store.rs`](crates/graph/src/store.rs).
 
-  storage_sup --> StorageWriter["StorageWriter<br/><i>GenServer</i>"]
-
-  index_sup --> FtsActor["FtsActor<br/><i>GenServer</i>"]
-  index_sup --> HnswActor["HnswActor<br/><i>GenServer</i>"]
-  index_sup --> GcActor["GcActor<br/><i>periodic</i>"]
-
-  client_sup --> ConnectionActor["ConnectionActor<br/><i>per client</i>"]
-```
-
-Actors manage stateful subsystems (storage writes, index maintenance, client
-connections, background GC). Hot-path operations (key encoding, distance
-computation, query parsing) remain direct function calls -- no mailbox overhead.
+> **Roadmap note.** An Erlang/OTP-style supervision tree built on
+> [joerl](https://crates.io/crates/joerl) is planned for distributed
+> clustering. `crates/storage/src/actor.rs` sketches a `StorageWriter`
+> GenServer, but it is **not spawned** — the current runtime is a plain Tokio
+> task per connection, and storage access is direct.
 
 ### Key Encoding
 
@@ -177,7 +176,6 @@ dllb/
   crates/
     core/                 # RecordId, Value, Error, Schema, FieldType::Vector
     storage/              # KvStore trait, redb backend, WAL, key encoding
-    transaction/          # MVCC, transaction manager, conflict detection
     document/             # Document model, CRUD, secondary indexes
     graph/                # Graph model, edge storage, traversal engine
     search/               # Tantivy integration, full-text index management
@@ -194,7 +192,7 @@ dllb/
 |-----------|--------|-----------|
 | Storage | [redb](https://github.com/cberner/redb) | Pure Rust, ACID, MVCC, crash-safe, zero C deps |
 | Full-text | [Tantivy](https://github.com/quickwit-oss/tantivy) | Lucene-class, BM25, 15K+ stars, MIT |
-| Actor system | [joerl](https://crates.io/crates/joerl) | Erlang/OTP supervision, GenServer, telemetry |
+| Actor system | [joerl](https://crates.io/crates/joerl) | Erlang/OTP patterns; used for the planned clustering layer |
 | Async runtime | [Tokio](https://tokio.rs) | Industry standard |
 | Serialization | MessagePack + JSON | Compact internal, readable external |
 | Vector math | SIMD (planned) | Hardware-accelerated distance computation |
@@ -253,40 +251,52 @@ cargo test --workspace
 
 ## Query Language
 
-dllb uses a SQL-like declarative language inspired by SurrealQL:
+dllb uses a SQL-like declarative language inspired by SurrealQL. The full
+grammar is documented in `dllb-cli --help`; the essentials:
 
 ```sql
 -- Documents
-CREATE user SET name = 'Alice', age = 30;
-SELECT name, age FROM user WHERE age > 25;
+CREATE user:alice SET name = 'Alice', age = 30;
+CREATE user:bob SET name = 'Bob' ON CONFLICT UPDATE SET age = 31;
+SELECT name, age FROM user WHERE age > 25 ORDER BY age DESC LIMIT 10;
 UPDATE user:alice SET age = 31;
-DELETE user:alice;
+DELETE user:alice;                       -- one record
+DELETE user WHERE age < 18;              -- matching records
+DELETE ALL FROM user;                    -- every record (explicit on purpose)
+
+-- Counting
+COUNT user;
+COUNT user WHERE age > 25 GROUP BY city;
 
 -- Graphs
 RELATE user:alice->purchased->product:widget SET quantity = 2;
 SELECT ->purchased->product.name FROM user:alice;
+GRAPH PATH alice -> widget ON purchased;
+GRAPH PAGERANK purchased LIMIT 10;
+GRAPH COMMUNITIES purchased ALGORITHM louvain;
+GRAPH COMPONENTS purchased;
+GRAPH CENTRALITY purchased INDEGREE;
+GRAPH EDGES purchased WHERE weight > 0.5;
 
--- Full-text search
-SELECT * FROM article WHERE content @@ 'distributed consensus';
+-- Indexes
+DEFINE INDEX by_age ON user FIELDS age;
+DEFINE INDEX by_tenant_age ON user FIELDS tenant, age UNIQUE;
+DEFINE FULLTEXT INDEX ft ON article FIELDS body ANALYZER english;
+DEFINE VECTOR INDEX vec ON ast_node FIELDS source_embedding DIMENSION 768 METRIC cosine;
+REMOVE INDEX by_age ON user;
+COMPACT;
 
--- Vector similarity (KNN)
-SELECT id, vector::distance::knn() AS dist
-  FROM ast_node
-  WHERE embedding <|10,100|> $query_embedding
-  ORDER BY dist;
+-- Full-text and vector search
+SEARCH article body 'distributed consensus' LIMIT 10;
+VECTOR SEARCH ast_node source_embedding [0.1, -0.2, ...] K 10;
+HYBRID SEARCH article TEXT body 'consensus' VECTOR embedding [0.1, ...] ALPHA 0.6 LIMIT 10;
 
--- Cross-model: all four in one query
-SELECT id, name,
-    vector::distance::knn() AS vec_score,
-    search::score(1) AS ft_score
-  FROM ast_node
-  WHERE kind = 'function'
-  AND embedding <|20,50|> $query_vec
-  AND source_text @1@ 'async fn'
-  AND ->calls->fn_node.module = 'core'
-  ORDER BY vec_score * 0.6 + ft_score * 0.4 DESC
-  LIMIT 10;
+-- Output format
+SELECT * FROM user OUTCOME CSV;
 ```
+
+`SEARCH`, `VECTOR SEARCH`, and `HYBRID SEARCH` accept an optional `WHERE`
+clause that post-filters the ranked hits.
 
 ## Roadmap
 
@@ -300,7 +310,7 @@ SELECT id, name,
 - [x] Graph edge storage and traversal (bidirectional, multi-hop walk, filtered)
 - [x] Tantivy full-text integration (BM25 scoring, language stemming, multi-index)
 - [x] HNSW vector index (distance metrics, brute-force baseline, in-memory HNSW with recall tests)
-- [x] AST/MetaAST code intelligence layer (38 MetaAST node types, code tokenizer, schemas, extraction)
+- [x] AST/MetaAST code intelligence layer (46 MetaAST node types, code tokenizer, schemas, extraction)
 - [x] Query parser and executor (tokenizer, recursive-descent parser, direct executor)
 - [x] TCP server and CLI REPL (tokio TCP, line protocol, JSON responses, rustyline REPL)
 

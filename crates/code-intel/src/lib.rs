@@ -11,9 +11,11 @@
 //!   `NodeChildren`, `Layer` -- the complete MetaAST type system
 //! - [`tokenizer`]: code-aware tokenizer splitting camelCase/snake_case,
 //!   stripping noise keywords, suitable for Tantivy full-text indexing
-//! - [`schemas`]: predefined `TableDefinition` for AST nodes with 11
+//! - [`schemas`]: predefined `TableDefinition` for AST nodes with 13
 //!   fields (including vector embedding fields), and 6 edge type constants
 //! - [`extract`]: tree walking, function/import/variable/call extraction
+//! - [`ingest`]: MetaAST tree -> `ast_node` documents + graph edges, and
+//!   the query-language batch that loads them
 
 pub mod diff;
 pub mod extract;

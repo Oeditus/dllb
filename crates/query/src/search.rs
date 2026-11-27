@@ -190,20 +190,28 @@ impl SearchServices {
         Ok(())
     }
 
-    /// Insert/replace a vector. Dimension mismatches are skipped silently
-    /// (the document simply is not represented in the index).
+    /// Insert/replace a vector.
+    ///
+    /// A dimension mismatch is an error rather than a silent skip: dropping
+    /// the document would make it invisible to `VECTOR SEARCH` with no
+    /// indication that the write was partially ignored.
     pub fn vector_insert(&self, name: &str, id: &str, vector: Vec<f32>) -> Result<()> {
         let index_arc = {
             let map = self.vectors.read().map_err(lock_err)?;
-            map.get(name)
-                .filter(|entry| vector.len() == entry.dim)
-                .map(|entry| Arc::clone(&entry.index))
+            match map.get(name) {
+                Some(entry) if vector.len() != entry.dim => {
+                    return Err(Error::DimensionMismatch {
+                        expected: entry.dim,
+                        actual: vector.len(),
+                    });
+                }
+                Some(entry) => Arc::clone(&entry.index),
+                None => return Ok(()),
+            }
         };
-        if let Some(index) = index_arc {
-            let mut hnsw = index.write().map_err(lock_err)?;
-            hnsw.remove(id);
-            hnsw.insert(id, vector);
-        }
+        let mut hnsw = index_arc.write().map_err(lock_err)?;
+        hnsw.remove(id);
+        hnsw.insert(id, vector);
         Ok(())
     }
 

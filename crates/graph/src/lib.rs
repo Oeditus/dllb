@@ -28,5 +28,5 @@ pub use components::{Components, connected_components};
 pub use edge::Edge;
 pub use pagerank::{PageRankOptions, pagerank};
 pub use path::shortest_path;
-pub use store::EdgeStore;
+pub use store::{EdgeStore, WriteVersions, global_write_versions};
 pub use traverse::{Direction, HopSpec, Traversal};
