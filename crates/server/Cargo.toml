@@ -3,6 +3,9 @@ name = "dllb-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "TCP/WebSocket server for dllb"
 
 [dependencies]

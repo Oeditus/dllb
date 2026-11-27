@@ -14,22 +14,25 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["Aleksei Matiushkin <am@mudasobwa.ru>"]
 description = "dllb -- a multi-model NoSQL DBMS with native graphs, documents, full-text search, and vector embeddings"
+repository = "https://github.com/Oeditus/dllb"
+homepage = "https://github.com/Oeditus/dllb"
+readme = "README.md"
 
 [workspace.dependencies]
 # Internal crates
-dllb-core = { path = "crates/core" }
-dllb-storage = { path = "crates/storage" }
-dllb-document = { path = "crates/document" }
-dllb-graph = { path = "crates/graph" }
-dllb-search = { path = "crates/search" }
-dllb-vector = { path = "crates/vector" }
-dllb-code-intel = { path = "crates/code-intel" }
-dllb-query = { path = "crates/query" }
+dllb-core = { path = "crates/core", version = "1.2.0" }
+dllb-storage = { path = "crates/storage", version = "1.2.0" }
+dllb-document = { path = "crates/document", version = "1.2.0" }
+dllb-graph = { path = "crates/graph", version = "1.2.0" }
+dllb-search = { path = "crates/search", version = "1.2.0" }
+dllb-vector = { path = "crates/vector", version = "1.2.0" }
+dllb-code-intel = { path = "crates/code-intel", version = "1.2.0" }
+dllb-query = { path = "crates/query", version = "1.2.0" }
 
 # Serialization
 serde = { version = "1.0.229", features = ["derive"] }

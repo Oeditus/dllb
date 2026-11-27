@@ -109,7 +109,7 @@ impl<'a, 's> Maintainer<'a, 's> {
     /// `doc` is the post-write document for a create/update, or `None` for a
     /// delete. `defs` is the table's already-loaded catalog (so this adds no
     /// extra scan). No-op when search services are disabled. Full-text writes
-    /// are buffered; the caller must call [`commit_search`](Self::commit_search).
+    /// are buffered; the caller must call [`commit`](Self::commit).
     pub fn maintain(
         &self,
         table: &str,

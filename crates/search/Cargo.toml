@@ -3,6 +3,9 @@ name = "dllb-search"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Tantivy integration for full-text search with BM25 scoring"
 
 [dependencies]

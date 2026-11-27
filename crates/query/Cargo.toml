@@ -3,6 +3,9 @@ name = "dllb-query"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Query language: lexer, parser, AST, planner, optimizer, executor"
 
 [dependencies]

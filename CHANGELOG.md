@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository despite being declared in every `Cargo.toml`.
 
 ### Added
+- Published all ten workspace crates to crates.io with versioned internal
+  dependencies and inherited repository/readme metadata. Cross-model storage
+  tests now live in `dllb-query` to keep registry dependencies acyclic.
 - `LICENSE` (MIT).
 - `Collection::merge_returning` and `Collection::delete_many`.
 - `dllb_graph::WriteVersions` and `global_write_versions()`, re-exported from

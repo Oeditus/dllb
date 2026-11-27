@@ -64,12 +64,12 @@ jobs:
       - name: Build (native)
         if: ${{ !matrix.cross }}
         working-directory: Oeditus/dllb
-        run: cargo build --release --target ${{ matrix.target }} -p dllb-server -p dllb-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p dllb-server -p dllb-cli
 
       - name: Build (cross)
         if: matrix.cross
         working-directory: Oeditus/dllb
-        run: cross build --release --target ${{ matrix.target }} -p dllb-server -p dllb-cli
+        run: cross build --release --locked --target ${{ matrix.target }} -p dllb-server -p dllb-cli
 
       - name: Package
         working-directory: Oeditus/dllb
@@ -77,8 +77,8 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           archive="dllb-${tag}-${{ matrix.target }}"
           mkdir -p "dist/${archive}"
-          cp "target/${{ matrix.target }}/release/dllb-server" "dist/${archive}/" || true
-          cp "target/${{ matrix.target }}/release/dllb-cli"    "dist/${archive}/" || true
+          cp "target/${{ matrix.target }}/release/dllb-server" "dist/${archive}/"
+          cp "target/${{ matrix.target }}/release/dllb-cli"    "dist/${archive}/"
           # LICENSE and README are required: the tarball is the distribution
           # unit, and shipping it without the license text is not acceptable.
           cp LICENSE README.md                                 "dist/${archive}/"

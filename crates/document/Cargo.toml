@@ -3,6 +3,9 @@ name = "dllb-document"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Document model, CRUD operations, secondary indexes"
 
 [dependencies]

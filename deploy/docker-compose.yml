@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   dllb-server:
-    image: ghcr.io/oeditus/dllb:1.1.0
+    image: ghcr.io/oeditus/dllb:1.2.0
     container_name: dllb-server
     restart: unless-stopped
     ports:

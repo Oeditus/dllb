@@ -3,6 +3,9 @@ name = "dllb-vector"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "HNSW vector index, distance metrics, VECTOR type, quantization"
 
 [dependencies]

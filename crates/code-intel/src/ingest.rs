@@ -336,7 +336,7 @@ pub fn prepare_batch(root: &MetaNode, file_path: &str, language: &str) -> Ingest
 ///
 /// Record ids and edge types are emitted verbatim, so they must be valid
 /// query-language identifiers. [`prepare_batch`] guarantees this by encoding
-/// the `file_path` that seeds every id (see [`encode_path`]).
+/// the `file_path` that seeds every id using percent encoding.
 pub fn generate_dllb_queries(batch: &IngestBatch) -> Vec<String> {
     let mut queries = Vec::new();
 

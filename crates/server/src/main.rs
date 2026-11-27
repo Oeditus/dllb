@@ -182,7 +182,7 @@ response per line. Wrap statements in `BEGIN BATCH` / `END BATCH` to apply
 them in a single transaction.
 ";
 
-/// Parse the process arguments (excluding argv[0]).
+/// Parse the process arguments (excluding `argv[0]`).
 ///
 /// Flags override environment variables, which override the built-in
 /// defaults. Unknown flags are an error rather than being ignored: silently

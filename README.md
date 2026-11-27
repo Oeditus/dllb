@@ -19,7 +19,7 @@
 ---
 
 > [!IMPORTANT]
-> **Release Note (v1.1.0)**: `dllb` 1.1.0 refreshes the dependency stack, including `joerl` 0.8, Tantivy 0.27, and updated CLI, vector, and allocator libraries. See [CHANGELOG.md](CHANGELOG.md) for details.
+> **Release Note (v1.2.0)**: `dllb` 1.2.0 adds plain JSON wire results, explicit bulk deletion, index discovery, server configuration flags, and storage/index correctness fixes. Review the breaking changes in [CHANGELOG.md](CHANGELOG.md) before upgrading.
 
 ### Modern Features (v1.0.0)
 - **Zero-Copy & Zero-Dependency Engine**: Built on pure Rust `redb` for ACID transactions and thread-safe MVCC reads without dynamic C links.
@@ -206,7 +206,7 @@ curl -fsSL https://raw.githubusercontent.com/Oeditus/dllb/main/install.sh | sh
 
 #### Option 2: Docker
 ```bash
-docker run -d --name dllb-server -p 3009:3009 ghcr.io/oeditus/dllb:1.1.0
+docker run -d --name dllb-server -p 3009:3009 ghcr.io/oeditus/dllb:1.2.0
 ```
 
 #### Option 3: Docker Compose

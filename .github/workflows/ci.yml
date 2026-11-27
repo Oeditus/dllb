@@ -43,16 +43,11 @@ jobs:
 
       - name: Format check
         working-directory: Oeditus/dllb
-        run: >
-          cargo fmt --check
-          -p dllb-core -p dllb-storage -p dllb-transaction
-          -p dllb-document -p dllb-graph -p dllb-search
-          -p dllb-vector -p dllb-code-intel -p dllb-query
-          -p dllb-server -p dllb-cli
+        run: cargo fmt --all --check
 
       - name: Clippy
         working-directory: Oeditus/dllb
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -89,4 +84,4 @@ jobs:
 
       - name: Run tests
         working-directory: Oeditus/dllb
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
