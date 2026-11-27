@@ -33,6 +33,67 @@ pub fn format_error(err: &dllb_core::Error, outcome: OutcomeFormat) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Plain JSON projection
+// ---------------------------------------------------------------------------
+//
+// `Value`'s `Serialize` impl is the MessagePack *storage* encoding: it tags
+// every variant (`{"String":"Alice"}`), which is correct for round-tripping
+// through redb but hostile as a client-facing wire format. Rows are therefore
+// projected into plain `serde_json::Value` before serialisation, so clients
+// see `{"name":"Alice"}`. The storage encoding is untouched.
+
+/// Project a [`Value`] into plain JSON.
+///
+/// Lossy only where JSON has no equivalent: `Bytes` becomes a byte-count
+/// placeholder and `RecordId` becomes its `table:id` string.
+fn to_plain_json(value: &Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match value {
+        Value::None => J::Null,
+        Value::Bool(b) => J::Bool(*b),
+        Value::Int(n) => J::Number((*n).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(J::Number)
+            // NaN/Infinity have no JSON representation; render as null
+            // rather than emitting invalid JSON.
+            .unwrap_or(J::Null),
+        Value::String(s) => J::String(s.clone()),
+        Value::Bytes(b) => J::String(format!("<{} bytes>", b.len())),
+        Value::RecordId(id) => J::String(id.to_string()),
+        Value::Array(items) => J::Array(items.iter().map(to_plain_json).collect()),
+        Value::Object(map) => J::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), to_plain_json(v)))
+                .collect(),
+        ),
+        Value::Vector(v) => J::Array(
+            v.iter()
+                .map(|f| {
+                    serde_json::Number::from_f64(*f as f64)
+                        .map(J::Number)
+                        .unwrap_or(J::Null)
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Project a result row into a plain JSON object.
+fn row_to_plain_json(row: &BTreeMap<String, Value>) -> serde_json::Value {
+    serde_json::Value::Object(
+        row.iter()
+            .map(|(k, v)| (k.clone(), to_plain_json(v)))
+            .collect(),
+    )
+}
+
+/// Serialise rows as a plain JSON array, falling back to `[]` on failure.
+fn rows_to_plain_json(rows: &[BTreeMap<String, Value>]) -> String {
+    let projected: Vec<serde_json::Value> = rows.iter().map(row_to_plain_json).collect();
+    serde_json::to_string(&projected).unwrap_or_else(|_| "[]".into())
+}
+
+// ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
 
@@ -64,7 +125,7 @@ fn format_result_json(result: &QueryResult) -> String {
             )
         }
         QueryResult::Rows(rows) => {
-            let json_rows = serde_json::to_string(rows).unwrap_or_else(|_| "[]".into());
+            let json_rows = rows_to_plain_json(rows);
             format!(
                 r#"{{"status":"rows","count":{},"data":{json_rows}}}"#,
                 rows.len()
@@ -72,7 +133,7 @@ fn format_result_json(result: &QueryResult) -> String {
         }
         QueryResult::Communities { algorithm, groups } => {
             let alg_json = serde_json::to_string(algorithm).unwrap_or_else(|_| "\"\"".into());
-            let json_groups = serde_json::to_string(groups).unwrap_or_else(|_| "[]".into());
+            let json_groups = rows_to_plain_json(groups);
             format!(
                 r#"{{"status":"communities","algorithm":{alg_json},"community_count":{},"data":{json_groups}}}"#,
                 groups.len()
@@ -334,6 +395,98 @@ mod tests {
     }
 
     // -- Compacted ----------------------------------------------------------
+
+    // -- plain JSON projection ----------------------------------------------
+
+    #[test]
+    fn json_rows_are_plain_not_serde_tagged() {
+        // The wire format must not leak `Value`'s MessagePack variant tags.
+        let mut row = BTreeMap::new();
+        row.insert("name".to_string(), Value::String("Alice".into()));
+        row.insert("age".to_string(), Value::Int(30));
+
+        let out = format_result(&QueryResult::Rows(vec![row]), OutcomeFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["data"][0]["name"], "Alice");
+        assert_eq!(parsed["data"][0]["age"], 30);
+        // No variant tagging anywhere in the payload.
+        assert!(!out.contains("\"String\""), "leaked serde tag: {out}");
+        assert!(!out.contains("\"Int\""), "leaked serde tag: {out}");
+    }
+
+    #[test]
+    fn json_projection_covers_every_value_variant() {
+        let mut obj = BTreeMap::new();
+        obj.insert("k".to_string(), Value::Bool(true));
+
+        let mut row = BTreeMap::new();
+        row.insert("none".to_string(), Value::None);
+        row.insert("bool".to_string(), Value::Bool(false));
+        row.insert("int".to_string(), Value::Int(-1));
+        row.insert("float".to_string(), Value::Float(1.5));
+        row.insert("string".to_string(), Value::String("s".into()));
+        row.insert("bytes".to_string(), Value::Bytes(vec![0; 4]));
+        row.insert(
+            "array".to_string(),
+            Value::Array(vec![Value::Int(1), Value::String("a".into())]),
+        );
+        row.insert("object".to_string(), Value::Object(obj));
+        row.insert(
+            "record".to_string(),
+            Value::RecordId(dllb_core::RecordId::new("user", "alice")),
+        );
+        row.insert("vector".to_string(), Value::Vector(vec![0.5, 1.0]));
+
+        let out = format_result(&QueryResult::Rows(vec![row]), OutcomeFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let r = &parsed["data"][0];
+
+        assert_eq!(r["none"], serde_json::Value::Null);
+        assert_eq!(r["bool"], false);
+        assert_eq!(r["int"], -1);
+        assert_eq!(r["float"], 1.5);
+        assert_eq!(r["string"], "s");
+        assert_eq!(r["bytes"], "<4 bytes>");
+        assert_eq!(r["array"], serde_json::json!([1, "a"]));
+        assert_eq!(r["object"], serde_json::json!({"k": true}));
+        assert_eq!(r["record"], "user:alice");
+        assert_eq!(r["vector"], serde_json::json!([0.5, 1.0]));
+    }
+
+    #[test]
+    fn json_projection_renders_non_finite_floats_as_null() {
+        // NaN/Infinity are not representable in JSON; emitting them would
+        // produce a body no client can parse.
+        let mut row = BTreeMap::new();
+        row.insert("nan".to_string(), Value::Float(f64::NAN));
+        row.insert("inf".to_string(), Value::Float(f64::INFINITY));
+
+        let out = format_result(&QueryResult::Rows(vec![row]), OutcomeFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["data"][0]["nan"], serde_json::Value::Null);
+        assert_eq!(parsed["data"][0]["inf"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn json_communities_rows_are_plain_too() {
+        let mut group = BTreeMap::new();
+        group.insert("id".to_string(), Value::String("c1".into()));
+        group.insert(
+            "members".to_string(),
+            Value::Array(vec![Value::String("a".into())]),
+        );
+
+        let out = format_result(
+            &QueryResult::Communities {
+                algorithm: "louvain".into(),
+                groups: vec![group],
+            },
+            OutcomeFormat::Json,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["data"][0]["id"], "c1");
+        assert_eq!(parsed["data"][0]["members"], serde_json::json!(["a"]));
+    }
 
     #[test]
     fn compacted_renders_in_every_format() {

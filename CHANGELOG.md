@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   introspection.
 - `dllb_core::Value` implements `Display`, so CLI output and error messages
   render values readably instead of as serde-tagged enums.
+- JSON results are projected into plain JSON: a row is now
+  `{"name":"Alice","age":30}` instead of `{"name":{"String":"Alice"}}`.
+  `Value`'s serde encoding is unchanged -- it is the MessagePack storage
+  format and must keep round-tripping through redb.
 - `dllb_query::Maintainer`, which owns full-text/vector index lifecycle.
 - Unit tests for the executor's pure helpers (`cmp_values`, `order_cmp`,
   `group_key`, `normalize_scores`, `candidate_pool`, `plan_index_lookup`,
