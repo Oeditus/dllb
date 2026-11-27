@@ -234,8 +234,21 @@ cargo build --release
 #### Run the Server
 
 ```bash
-cargo run --release -p dllb-server
+cargo run --release -p dllb-server -- --bind 127.0.0.1:3009 --path dllb.redb
 ```
+
+Every setting is also an environment variable, and flags take precedence:
+
+| Flag | Env | Default |
+|------|-----|---------|
+| `--bind <ADDR>` | `DLLB_BIND` | `127.0.0.1:3009` |
+| `--path <FILE>` | `DLLB_PATH` | `dllb.redb` |
+| `--ns <NAME>` | `DLLB_NS` | `default` |
+| `--db <NAME>` | `DLLB_DB` | `default` |
+| `--sock <PATH>` | `DLLB_SOCK` | `dllb_<port>.sock` |
+
+`dllb-server --help` prints the full reference and exits without opening a
+database.
 
 #### Run the CLI
 

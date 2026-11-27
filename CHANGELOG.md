@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DimensionMismatch` instead of silently dropping the document from the index.
 - `dllb-cli` gains `--version`/`-V` and `--help`/`-h`, and rejects unknown
   arguments instead of silently ignoring them.
+- `dllb-server` gains `--help`/`-h`, `--version`/`-V`, and flags for every
+  setting it previously read only from the environment (`--bind`, `--path`,
+  `--ns`, `--db`, `--sock`). Flags override env vars, which override the
+  defaults; unknown flags and missing values exit 2 with a usage message.
+  Previously `dllb-server --help` started the server and blocked on `accept`.
 - `install.sh` uses `https://github.com/...` (was `https://github://...`, which
   could never resolve), fails loudly when no release is found instead of
   falling back to a stale hard-coded tag, and verifies `SHA256SUMS`.

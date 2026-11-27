@@ -117,6 +117,129 @@ enum ConnectionStream {
     Unix(tokio::net::UnixStream),
 }
 
+// ---------------------------------------------------------------------------
+// Command-line configuration
+// ---------------------------------------------------------------------------
+
+/// Server configuration, resolved from flags with environment fallbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Config {
+    bind: String,
+    db_path: String,
+    ns: String,
+    db: String,
+    sock: Option<String>,
+}
+
+impl Config {
+    /// Resolve configuration from environment variables only.
+    fn from_env() -> Self {
+        Self {
+            bind: std::env::var("DLLB_BIND").unwrap_or_else(|_| "127.0.0.1:3009".into()),
+            db_path: std::env::var("DLLB_PATH").unwrap_or_else(|_| "dllb.redb".into()),
+            ns: std::env::var("DLLB_NS").unwrap_or_else(|_| "default".into()),
+            db: std::env::var("DLLB_DB").unwrap_or_else(|_| "default".into()),
+            sock: std::env::var("DLLB_SOCK").ok(),
+        }
+    }
+}
+
+/// The outcome of parsing the command line.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// Run the server with this configuration.
+    Run(Config),
+    /// Print this text to stdout and exit 0.
+    Print(String),
+    /// Print this message to stderr and exit 2.
+    Usage(String),
+}
+
+const HELP: &str = "\
+dllb-server -- multi-model NoSQL database server
+
+USAGE:
+    dllb-server [OPTIONS]
+
+OPTIONS:
+    --bind <ADDR>       TCP address to listen on       [env: DLLB_BIND] [default: 127.0.0.1:3009]
+    --path <FILE>       Database file to open          [env: DLLB_PATH] [default: dllb.redb]
+    --ns <NAME>         Namespace                      [env: DLLB_NS]   [default: default]
+    --db <NAME>         Database                       [env: DLLB_DB]   [default: default]
+    --sock <PATH>       Unix socket path; `{port}` is substituted with the bound
+                        port, and a bare `.sock` path is suffixed with it
+                                                       [env: DLLB_SOCK] [default: dllb_<port>.sock]
+    -h, --help          Print this help and exit
+    -V, --version       Print the version and exit
+
+ENVIRONMENT:
+    DLLB_LOG            Log filter, e.g. `dllb_server=debug`  [default: info]
+    DLLB_WATCH_STDIN    Exit when stdin closes (default: on when stdin is not a TTY)
+
+The server speaks a line-based protocol over TCP and a Unix domain socket:
+one query per line, one JSON (or TOON/CSV, per the query's OUTCOME clause)
+response per line. Wrap statements in `BEGIN BATCH` / `END BATCH` to apply
+them in a single transaction.
+";
+
+/// Parse the process arguments (excluding argv[0]).
+///
+/// Flags override environment variables, which override the built-in
+/// defaults. Unknown flags are an error rather than being ignored: silently
+/// starting a server on the default port when the operator asked for another
+/// one is far worse than refusing to start.
+fn parse_args(args: &[String]) -> Invocation {
+    let mut config = Config::from_env();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => return Invocation::Print(HELP.to_string()),
+            "-V" | "--version" => {
+                return Invocation::Print(format!("dllb-server {}", env!("CARGO_PKG_VERSION")));
+            }
+            flag @ ("--bind" | "--path" | "--ns" | "--db" | "--sock") => {
+                let Some(value) = args.get(i + 1) else {
+                    return Invocation::Usage(format!("{flag} requires a value"));
+                };
+                match flag {
+                    "--bind" => config.bind = value.clone(),
+                    "--path" => config.db_path = value.clone(),
+                    "--ns" => config.ns = value.clone(),
+                    "--db" => config.db = value.clone(),
+                    _ => config.sock = Some(value.clone()),
+                }
+                i += 2;
+            }
+            other => {
+                return Invocation::Usage(format!(
+                    "unrecognized argument '{other}'; try `dllb-server --help`"
+                ));
+            }
+        }
+    }
+
+    Invocation::Run(config)
+}
+
+/// Resolve the Unix socket path for the bound `port`.
+///
+/// `{port}` in an explicit path is substituted; a bare `*.sock` path is
+/// suffixed with the port so concurrently started servers do not collide.
+fn resolve_sock_path(sock: Option<&str>, port: u16) -> String {
+    let Some(s) = sock else {
+        return format!("dllb_{port}.sock");
+    };
+    if s.contains("{port}") {
+        s.replace("{port}", &port.to_string())
+    } else if s.ends_with(".sock") && !s.contains(&port.to_string()) {
+        let stem = s.trim_end_matches(".sock");
+        format!("{stem}_{port}.sock")
+    } else {
+        s.to_string()
+    }
+}
+
 /// Process-wide state shared across all connection handlers.
 struct ServerState {
     storage: Arc<DllbStorage>,
@@ -129,6 +252,21 @@ struct ServerState {
 
 #[tokio::main]
 async fn main() {
+    // Parse before initialising logging or opening the database: `--help` and
+    // `--version` must work on a machine with no writable database path, and
+    // an argument error should not emit log noise first.
+    let config = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Invocation::Run(config) => config,
+        Invocation::Print(text) => {
+            println!("{text}");
+            return;
+        }
+        Invocation::Usage(message) => {
+            eprintln!("dllb-server: {message}");
+            std::process::exit(2);
+        }
+    };
+
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .or_else(|_| {
             tracing_subscriber::EnvFilter::try_new(
@@ -142,10 +280,13 @@ async fn main() {
         .with_writer(|| SafeWriter::new(io::stdout()))
         .init();
 
-    let bind = std::env::var("DLLB_BIND").unwrap_or_else(|_| "127.0.0.1:3009".into());
-    let db_path = std::env::var("DLLB_PATH").unwrap_or_else(|_| "dllb.redb".into());
-    let ns = std::env::var("DLLB_NS").unwrap_or_else(|_| "default".into());
-    let db = std::env::var("DLLB_DB").unwrap_or_else(|_| "default".into());
+    let Config {
+        bind,
+        db_path,
+        ns,
+        db,
+        sock,
+    } = config;
 
     let storage = open_storage_or_panic(&db_path);
 
@@ -188,19 +329,7 @@ async fn main() {
     let bound_addr = listener.local_addr().unwrap_or(addr);
     let port = bound_addr.port();
 
-    let sock_path = match std::env::var("DLLB_SOCK") {
-        Ok(s) => {
-            if s.contains("{port}") {
-                s.replace("{port}", &port.to_string())
-            } else if s.ends_with(".sock") && !s.contains(&port.to_string()) {
-                let stem = s.trim_end_matches(".sock");
-                format!("{stem}_{port}.sock")
-            } else {
-                s
-            }
-        }
-        Err(_) => format!("dllb_{port}.sock"),
-    };
+    let sock_path = resolve_sock_path(sock.as_deref(), port);
 
     #[cfg(unix)]
     let unix_listener = {
@@ -482,4 +611,164 @@ async fn handle_connection<R, W>(
         }
     }
     tracing::info!("connection from {remote_addr} handler finished");
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+//
+// Argument parsing is pure, so it is tested without opening a database or
+// binding a socket. Environment-dependent defaults are exercised through
+// `Config::from_env` only where the test controls the variables.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn run(list: &[&str]) -> Config {
+        match parse_args(&args(list)) {
+            Invocation::Run(config) => config,
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_short_and_long_both_print() {
+        for flag in ["-h", "--help"] {
+            match parse_args(&args(&[flag])) {
+                Invocation::Print(text) => {
+                    assert!(text.contains("USAGE:"));
+                    assert!(text.contains("--bind"));
+                    assert!(text.contains("--path"));
+                }
+                other => panic!("expected Print for {flag}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn version_short_and_long_both_print() {
+        for flag in ["-V", "--version"] {
+            match parse_args(&args(&[flag])) {
+                Invocation::Print(text) => {
+                    assert_eq!(text, format!("dllb-server {}", env!("CARGO_PKG_VERSION")));
+                }
+                other => panic!("expected Print for {flag}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn help_wins_even_when_other_flags_precede_it() {
+        // `--help` must not require the other flags to be valid first.
+        match parse_args(&args(&["--path", "x.redb", "--help"])) {
+            Invocation::Print(text) => assert!(text.contains("USAGE:")),
+            other => panic!("expected Print, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_flag_is_a_usage_error() {
+        match parse_args(&args(&["--nope"])) {
+            Invocation::Usage(message) => {
+                assert!(message.contains("--nope"), "{message}");
+                assert!(message.contains("--help"), "{message}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flag_without_value_is_a_usage_error() {
+        for flag in ["--bind", "--path", "--ns", "--db", "--sock"] {
+            match parse_args(&args(&[flag])) {
+                Invocation::Usage(message) => {
+                    assert!(message.contains("requires a value"), "{message}");
+                }
+                other => panic!("expected Usage for {flag}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn flags_override_the_environment() {
+        let config = run(&[
+            "--bind",
+            "0.0.0.0:1234",
+            "--path",
+            "/tmp/x.redb",
+            "--ns",
+            "n",
+            "--db",
+            "d",
+            "--sock",
+            "/tmp/x.sock",
+        ]);
+        assert_eq!(config.bind, "0.0.0.0:1234");
+        assert_eq!(config.db_path, "/tmp/x.redb");
+        assert_eq!(config.ns, "n");
+        assert_eq!(config.db, "d");
+        assert_eq!(config.sock.as_deref(), Some("/tmp/x.sock"));
+    }
+
+    #[test]
+    fn last_flag_wins() {
+        let config = run(&["--path", "a.redb", "--path", "b.redb"]);
+        assert_eq!(config.db_path, "b.redb");
+    }
+
+    #[test]
+    fn no_arguments_yields_the_documented_defaults() {
+        // Only assert the defaults that do not depend on ambient env vars.
+        let config = run(&[]);
+        assert!(!config.bind.is_empty());
+        assert!(!config.db_path.is_empty());
+        assert!(!config.ns.is_empty());
+        assert!(!config.db.is_empty());
+    }
+
+    // -- resolve_sock_path --------------------------------------------------
+
+    #[test]
+    fn sock_path_defaults_to_the_bound_port() {
+        assert_eq!(resolve_sock_path(None, 3009), "dllb_3009.sock");
+    }
+
+    #[test]
+    fn sock_path_substitutes_the_port_placeholder() {
+        assert_eq!(
+            resolve_sock_path(Some("/run/dllb-{port}.sock"), 3009),
+            "/run/dllb-3009.sock"
+        );
+    }
+
+    #[test]
+    fn sock_path_suffixes_a_bare_sock_path_with_the_port() {
+        // Two servers started concurrently must not collide on one socket.
+        assert_eq!(
+            resolve_sock_path(Some("/tmp/dllb.sock"), 3009),
+            "/tmp/dllb_3009.sock"
+        );
+        assert_eq!(
+            resolve_sock_path(Some("/tmp/dllb.sock"), 3010),
+            "/tmp/dllb_3010.sock"
+        );
+    }
+
+    #[test]
+    fn sock_path_left_alone_when_it_already_names_the_port() {
+        assert_eq!(
+            resolve_sock_path(Some("/tmp/dllb_3009.sock"), 3009),
+            "/tmp/dllb_3009.sock"
+        );
+    }
+
+    #[test]
+    fn sock_path_without_sock_suffix_is_used_verbatim() {
+        assert_eq!(resolve_sock_path(Some("/tmp/custom"), 3009), "/tmp/custom");
+    }
 }
